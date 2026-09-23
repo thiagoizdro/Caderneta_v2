@@ -1,0 +1,31 @@
+# Sobe o Caderneta completo: PostgreSQL + API servindo o PWA.
+#   docker compose up --build   →   http://localhost:3001
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: caderneta
+      POSTGRES_PASSWORD: caderneta
+      POSTGRES_DB: caderneta
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U caderneta"]
+      interval: 5s
+      retries: 10
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgres://caderneta:caderneta@db:5432/caderneta
+      PORT: 3001
+    ports:
+      - "3001:3001"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

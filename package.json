@@ -1,0 +1,18 @@
+{
+  "name": "caderneta",
+  "version": "2.2.0",
+  "private": true,
+  "description": "Caderneta 2.x — gestão financeira pessoal offline-first com sincronização em nuvem",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "db:dev": "npm run db:dev -w server",
+    "dev:server": "npm run dev -w server",
+    "dev:client": "npm run dev -w client",
+    "build": "npm run build -w client",
+    "start": "npm start -w server",
+    "test": "npm test -w client && npm test -w server"
+  }
+}
