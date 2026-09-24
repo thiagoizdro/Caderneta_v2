@@ -3,3 +3,7 @@ client/dist/
 server/.env
 server/.pgdata/
 *.log
+
+# Backups pessoais do Caderneta (contêm dados financeiros)
+caderneta_backup*.json
+*.csv
