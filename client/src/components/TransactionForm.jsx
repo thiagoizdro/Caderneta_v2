@@ -1,15 +1,16 @@
-import { ArrowDownRight, ArrowLeftRight, ArrowUpRight, Info, Sparkles } from 'lucide-react';
+import { ArrowDownRight, ArrowLeftRight, ArrowUpRight, HandCoins, Info, Sparkles } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { suggestCategory } from '../lib/categorize.js';
 import { saveRecurrence } from '../lib/bootstrap.js';
 import { FREQUENCIES, buildInstallments, defaultAccountId, isCredit, splitInstallments } from '../lib/finance.js';
-import { CATEGORY_IDS } from '../lib/defaults.js';
+import { CATEGORY_IDS, PAYMENT_METHODS, RECEIVABLE_ID } from '../lib/defaults.js';
 import { money, parseAmount, round2 } from '../lib/format.js';
 import { budgetAlertFor } from '../lib/notify.js';
 import { newId, removeMany, save, saveMany } from '../lib/store.js';
 import { db } from '../lib/db.js';
 import { navigate, useData, useUI } from '../state.jsx';
 import { CategoryIcon, Modal } from './ui.jsx';
+import { WorkdayStatusTag, confirmPaidWorkday } from './PaymentForm.jsx';
 import { seriesColor } from './Icon.jsx';
 
 const TYPES = [
@@ -52,7 +53,21 @@ export function TransactionForm({ initial, onClose }) {
     const recurrence = initial?.recurrenceId ? recurrences.find((r) => r.id === initial.recurrenceId) : null;
     const accountOptions = activeAccounts.filter((a) => type !== 'income' || !isCredit(a));
     const toAccount = data.accountById.get(toAccountId);
-    const title = editing ? 'Editar lançamento' : 'Novo lançamento';
+    const isWorkdayTx = initial?.source === 'workday';
+    const workEntry = isWorkdayTx ? data.workLedger.byId.get(initial.id) : null;
+    const title = isWorkdayTx ? 'Editar diária' : editing ? 'Editar lançamento' : 'Novo lançamento';
+
+    async function moveToReceivable() {
+        const ok = await ui.confirm({
+            title: 'Mover para "a receber"?',
+            message: `${money(initial.amount)} saem do saldo de ${data.accountById.get(initial.accountId)?.name || 'sua conta'} e esta diária passa a aguardar o pagamento da empresa.`,
+            confirmLabel: 'Mover',
+        });
+        if (!ok) return;
+        await save('transactions', { ...initial, accountId: RECEIVABLE_ID });
+        ui.toast('Diária movida para a receber.', 'success');
+        onClose();
+    }
 
     function changeType(next) {
         setType(next);
@@ -71,7 +86,7 @@ export function TransactionForm({ initial, onClose }) {
         e?.preventDefault();
         if (!(amount > 0)) return setError('Informe um valor maior que zero.');
         if (!description.trim() && type !== 'transfer') return setError('Dê uma descrição ao lançamento.');
-        if (!accountId) return setError('Escolha uma conta.');
+        if (!accountId && !isWorkdayTx) return setError('Escolha uma conta.');
         if (type === 'transfer' && (!toAccountId || toAccountId === accountId)) return setError('Escolha uma conta de destino diferente da origem.');
         if (isThird && !person.trim()) return setError('Informe o nome do terceiro.');
         if (mode === 'installments' && !(installments >= 2 && installments <= 72)) return setError('Parcelas: de 2 a 72.');
@@ -87,6 +102,11 @@ export function TransactionForm({ initial, onClose }) {
             person: type === 'expense' && isThird ? person.trim() : '',
             notes: notes.trim(),
         };
+
+        // A diária continua onde estava (a receber ou, se antiga, na conta).
+        if (isWorkdayTx) base.accountId = initial.accountId;
+        const workdayChanged = isWorkdayTx && (round2(amount) !== round2(initial.amount) || date !== initial.date);
+        if (workdayChanged && !(await confirmPaidWorkday(ui, workEntry, 'alterar'))) return;
 
         let created = [];
         if (editing) {
@@ -140,6 +160,8 @@ export function TransactionForm({ initial, onClose }) {
             });
             if (!choice) return;
             if (choice === 'rest') ids = siblings.filter((t) => t.installment.index >= inst.index).map((t) => t.id);
+        } else if (workEntry?.paid > 0) {
+            if (!(await confirmPaidWorkday(ui, workEntry))) return;
         } else if (!(await ui.confirm({ title: 'Excluir lançamento?', message: `"${initial.description}" — ${money(initial.amount)}`, confirmLabel: 'Excluir', danger: true }))) {
             return;
         }
@@ -190,8 +212,24 @@ export function TransactionForm({ initial, onClose }) {
                         <span>Gerado pela recorrência "{recurrence.description}". Alterar aqui muda só esta ocorrência. <a href={`#/recorrentes?id=${recurrence.id}`} onClick={onClose}>Editar recorrência</a></span>
                     </div>
                 )}
-                {initial?.source === 'workday' && (
-                    <div className="callout info mt"><Info size={16} /> Dia trabalhado — para desmarcar, use o calendário.</div>
+                {isWorkdayTx && (
+                    <div className="callout info mt">
+                        <Info size={16} />
+                        <span>
+                            Dia trabalhado — para desmarcar, use o calendário.
+                            {workEntry && (
+                                <span className="row wrap" style={{ marginTop: 6, gap: 6 }}>
+                                    <WorkdayStatusTag status={workEntry.status} />
+                                    {workEntry.direct
+                                        ? <span>Lançada direto em {data.accountById.get(initial.accountId)?.name || 'uma conta'} (antes do controle de pagamentos).</span>
+                                        : <span>Recebido {money(workEntry.paid)} de {money(workEntry.amount)}.</span>}
+                                </span>
+                            )}
+                            {workEntry?.direct && (
+                                <button type="button" className="btn btn-secondary btn-sm" style={{ marginTop: 8 }} onClick={moveToReceivable}>Ainda não recebi — mover para a receber</button>
+                            )}
+                        </span>
+                    </div>
                 )}
 
                 <div className="field mt">
@@ -255,12 +293,14 @@ export function TransactionForm({ initial, onClose }) {
                         <label className="label" htmlFor="tx-date">{mode === 'installments' ? '1ª parcela' : 'Data'}</label>
                         <input id="tx-date" type="date" className="input" value={date} onChange={(e) => setDate(e.target.value || today)} required />
                     </div>
-                    <div className="field">
-                        <label className="label" htmlFor="tx-account">{type === 'transfer' ? 'De' : type === 'income' ? 'Entrou em' : 'Pago com'}</label>
-                        <select id="tx-account" className="select" value={accountId} onChange={(e) => setAccountId(e.target.value)}>
-                            {accountOptions.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-                        </select>
-                    </div>
+                    {!isWorkdayTx && (
+                        <div className="field">
+                            <label className="label" htmlFor="tx-account">{type === 'transfer' ? 'De' : type === 'income' ? 'Entrou em' : 'Pago com'}</label>
+                            <select id="tx-account" className="select" value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+                                {accountOptions.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                            </select>
+                        </div>
+                    )}
                 </div>
 
                 {type === 'transfer' && (
@@ -344,13 +384,33 @@ export function TransactionForm({ initial, onClose }) {
 }
 
 export function TransactionRow({ tx, onClick, showDate = false }) {
-    const { categoryById, accountById, today } = useData();
+    const { categoryById, accountById, today, workLedger } = useData();
     const category = categoryById.get(tx.categoryId);
     const account = accountById.get(tx.accountId);
     const to = accountById.get(tx.toAccountId);
     const future = tx.date > today;
     const sign = tx.type === 'income' ? '+ ' : tx.type === 'expense' ? '− ' : '';
     const cls = tx.type === 'income' ? 'pos' : tx.type === 'transfer' ? 'soft' : '';
+    const workEntry = tx.source === 'workday' ? workLedger.byId.get(tx.id) : null;
+
+    // Pagamento de diárias: dinheiro chegando da empresa (não é receita nova).
+    if (tx.source === 'workpayment') {
+        return (
+            <button className="list-row" onClick={() => onClick?.(tx)}>
+                <span className="cat-icon" style={{ '--c': 'var(--green)' }} aria-hidden="true"><HandCoins size={18} /></span>
+                <span className="list-main">
+                    <span className="list-title">{tx.description}</span>
+                    <span className="list-sub">
+                        {showDate && <span>{tx.date.split('-').reverse().slice(0, 2).join('/')}</span>}
+                        <span>{PAYMENT_METHODS[tx.method] || 'Pagamento'}{to ? ` → ${to.name}` : ''}</span>
+                        <span className="tag green">Diárias</span>
+                        {future && <span className="tag">Agendado</span>}
+                    </span>
+                </span>
+                <span className="list-amount soft">+ {money(tx.amount)}</span>
+            </button>
+        );
+    }
 
     return (
         <button className="list-row" onClick={() => onClick?.(tx)}>
@@ -364,6 +424,7 @@ export function TransactionRow({ tx, onClick, showDate = false }) {
                     {tx.type === 'transfer'
                         ? <span>{account?.name} → {to?.name}</span>
                         : <span>{category?.name || 'Sem categoria'}{account ? ` · ${account.name}` : ''}</span>}
+                    {workEntry && <WorkdayStatusTag status={workEntry.status} />}
                     {tx.person && <span className="tag gold">{tx.person}</span>}
                     {tx.installment && <span className="tag">{tx.installment.index}/{tx.installment.total}</span>}
                     {tx.source === 'recurrence' && <span className="tag blue">Recorrente</span>}

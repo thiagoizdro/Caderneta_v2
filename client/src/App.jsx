@@ -3,9 +3,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { materializeRecurrences } from './lib/bootstrap.js';
 import { runDailyReminders } from './lib/notify.js';
 import { startAutoSync } from './lib/sync.js';
-import { NAV_GROUPS, NAV_ITEMS } from './components/nav.js';
+import { NAV_GROUPS, NAV_ITEMS, useNavItems } from './components/nav.js';
 import { Icon } from './components/Icon.jsx';
 import { SearchPalette } from './components/SearchPalette.jsx';
+import { PaymentForm } from './components/PaymentForm.jsx';
 import { TransactionForm } from './components/TransactionForm.jsx';
 import { ConfirmDialog, Modal, Toasts } from './components/ui.jsx';
 import { UIContext, navigate, useData, useRoute, useSyncState, useUI } from './state.jsx';
@@ -13,6 +14,7 @@ import { Accounts } from './pages/Accounts.jsx';
 import { Budget } from './pages/Budget.jsx';
 import { CalendarPage } from './pages/CalendarPage.jsx';
 import { Dashboard } from './pages/Dashboard.jsx';
+import { Diarias } from './pages/Diarias.jsx';
 import { Goals } from './pages/Goals.jsx';
 import { More } from './pages/More.jsx';
 import { Onboarding } from './pages/Onboarding.jsx';
@@ -25,6 +27,7 @@ const ROUTES = {
     '/': Dashboard,
     '/lancamentos': Transactions,
     '/calendario': CalendarPage,
+    '/diarias': Diarias,
     '/contas': Accounts,
     '/recorrentes': Recurring,
     '/orcamento': Budget,
@@ -37,6 +40,7 @@ const ROUTES = {
 function Sidebar({ path }) {
     const ui = useUI();
     const sync = useSyncState();
+    const navItems = useNavItems();
     let lastGroup = null;
     return (
         <aside className="sidebar" aria-label="Navegação principal">
@@ -51,7 +55,7 @@ function Sidebar({ path }) {
                 <Plus size={18} aria-hidden="true" /> Novo lançamento <kbd>N</kbd>
             </button>
             <nav>
-                {NAV_ITEMS.map((item) => {
+                {navItems.map((item) => {
                     const header = item.group !== lastGroup && NAV_GROUPS[item.group]
                         ? <div className="nav-section">{NAV_GROUPS[item.group]}</div> : null;
                     lastGroup = item.group;
@@ -139,6 +143,7 @@ export function App({ migrated, bootError }) {
     const { path, params } = useRoute();
     const [toasts, setToasts] = useState([]);
     const [txModal, setTxModal] = useState(null);
+    const [payModal, setPayModal] = useState(null);
     const [searchOpen, setSearchOpen] = useState(false);
     const [dialog, setDialog] = useState(null);
     const bootstrapped = useRef(false);
@@ -151,7 +156,11 @@ export function App({ migrated, bootError }) {
 
     const ui = useMemo(() => ({
         toast,
-        openTx: (initial = {}) => setTxModal({ key: Date.now(), initial }),
+        // Pagamentos de diárias têm formulário próprio (valor, forma, diárias cobertas).
+        openTx: (initial = {}) => (initial?.source === 'workpayment'
+            ? setPayModal({ key: Date.now(), payment: initial })
+            : setTxModal({ key: Date.now(), initial })),
+        openPayment: (payment = null) => setPayModal({ key: Date.now(), payment }),
         openSearch: () => setSearchOpen(true),
         confirm: (opts) => new Promise((resolve) => setDialog({ kind: 'confirm', opts, resolve })),
         choose: (opts) => new Promise((resolve) => setDialog({ kind: 'choose', opts, resolve })),
@@ -186,14 +195,14 @@ export function App({ migrated, bootError }) {
             if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
                 e.preventDefault();
                 setSearchOpen(true);
-            } else if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'n' && !txModal && !searchOpen && !dialog) {
+            } else if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'n' && !txModal && !payModal && !searchOpen && !dialog) {
                 e.preventDefault();
                 ui.openTx();
             }
         };
         document.addEventListener('keydown', onKey);
         return () => document.removeEventListener('keydown', onKey);
-    }, [ui, txModal, searchOpen, dialog]);
+    }, [ui, txModal, payModal, searchOpen, dialog]);
 
     // Atalho do PWA / links: #/lancamentos?novo=1
     useEffect(() => {
@@ -204,6 +213,7 @@ export function App({ migrated, bootError }) {
     }, [params.novo, path, ui]);
 
     const closeTx = useCallback(() => setTxModal(null), []);
+    const closePay = useCallback(() => setPayModal(null), []);
     const closeSearch = useCallback(() => setSearchOpen(false), []);
 
     const Page = ROUTES[path] || Dashboard;
@@ -224,6 +234,7 @@ export function App({ migrated, bootError }) {
             )}
 
             {txModal && <TransactionForm key={txModal.key} initial={txModal.initial} onClose={closeTx} />}
+            {payModal && <PaymentForm key={payModal.key} payment={payModal.payment} onClose={closePay} />}
             {searchOpen && (
                 <SearchPalette
                     onClose={closeSearch}

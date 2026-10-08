@@ -1,10 +1,10 @@
 import { Topbar } from '../components/Topbar.jsx';
-import { NAV_ITEMS } from '../components/nav.js';
+import { useNavItems } from '../components/nav.js';
 import { Icon } from '../components/Icon.jsx';
 
 // Menu "Mais" do celular: tudo o que não cabe na barra inferior.
 export function More() {
-    const items = NAV_ITEMS.filter((n) => n.group !== 'main');
+    const items = useNavItems().filter((n) => n.group !== 'main');
     return (
         <div className="page">
             <Topbar eyebrow="Caderneta" title="Mais" />

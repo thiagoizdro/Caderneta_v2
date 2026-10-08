@@ -48,3 +48,10 @@ export const ACCOUNT_TYPES = {
 };
 
 export const SALARY_RECURRENCE_ID = 'rec-salario';
+
+// "Conta" virtual das diárias ainda não pagas pela empresa. Não existe em
+// `accounts`, então não entra em nenhum saldo: o dinheiro só chega às contas
+// quando um pagamento (transferência a-receber → conta) é registrado.
+export const RECEIVABLE_ID = 'a-receber';
+
+export const PAYMENT_METHODS = { pix: 'Pix', cash: 'Dinheiro', transfer: 'Transferência' };

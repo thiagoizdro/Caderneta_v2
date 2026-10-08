@@ -21,7 +21,7 @@ function Section({ id, title, children }) {
 }
 
 function ModeSection() {
-    const { profile, activeAccounts, transactions, today } = useData();
+    const { profile, activeAccounts, transactions, today, workLedger } = useData();
     const ui = useUI();
     const [mode, setMode] = useState(profile.mode);
     const [rate, setRate] = useState(String(profile.dailyRate || '').replace('.', ','));
@@ -48,8 +48,14 @@ function ModeSection() {
         });
         if (mode === 'daily' && applyMonth) {
             const ym = today.slice(0, 7);
-            const days = transactions.filter((t) => isWorkday(t) && t.date.startsWith(ym));
-            await saveMany('transactions', days.map((t) => ({ ...t, amount: round2(r) })));
+            const days = transactions.filter((t) => isWorkday(t) && t.date.startsWith(ym) && round2(t.amount) !== round2(r));
+            const paid = days.filter((t) => workLedger.byId.get(t.id)?.paid > 0);
+            const ok = !paid.length || await ui.confirm({
+                title: 'Alterar diárias já pagas?',
+                message: `${paid.length} ${paid.length === 1 ? 'diária deste mês já recebeu' : 'diárias deste mês já receberam'} pagamento. Os pagamentos continuam no histórico e os status são recalculados com o novo valor.`,
+                confirmLabel: 'Alterar mesmo assim',
+            });
+            if (ok) await saveMany('transactions', days.map((t) => ({ ...t, amount: round2(r) })));
         }
         ui.toast('Modo de controle salvo. Seus lançamentos foram preservados.', 'success');
     }
@@ -86,10 +92,11 @@ function ModeSection() {
                     </div>
                 )}
                 <div className="field">
-                    <label className="label" htmlFor="set-acc">{mode === 'daily' ? 'As diárias entram em' : 'O salário entra em'}</label>
+                    <label className="label" htmlFor="set-acc">{mode === 'daily' ? 'Pagamentos das diárias entram em' : 'O salário entra em'}</label>
                     <select id="set-acc" className="select" value={accountId} onChange={(e) => setAccountId(e.target.value)}>
                         {cashAccounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
                     </select>
+                    {mode === 'daily' && <span className="hint">Dias trabalhados ficam como saldo a receber até você registrar o pagamento em Diárias e pagamentos.</span>}
                 </div>
                 <button type="submit" className="btn btn-primary mt">Salvar modo</button>
             </form>

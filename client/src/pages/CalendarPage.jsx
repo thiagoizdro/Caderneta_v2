@@ -1,13 +1,13 @@
 import { CalendarCheck, CalendarX, ChevronLeft, ChevronRight, Plus } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Topbar } from '../components/Topbar.jsx';
+import { confirmPaidWorkday } from '../components/PaymentForm.jsx';
 import { TransactionRow } from '../components/TransactionForm.jsx';
 import { EmptyState } from '../components/ui.jsx';
 import {
     WEEKDAYS_SHORT, addMonthsToMonth, daysInMonth, endOfMonth, makeDate, monthLabel, monthOf, splitMonth, startOfMonth,
 } from '../lib/dates.js';
-import { CATEGORY_IDS, DEFAULT_ACCOUNT_ID } from '../lib/defaults.js';
-import { dailyReceipt, defaultAccountId, monthTotals, pendingOccurrences, workdayId } from '../lib/finance.js';
+import { buildWorkday, dailyReceipt, monthTotals, pendingOccurrences, workdayId } from '../lib/finance.js';
 import { capitalize, longDate, money, moneyCompact } from '../lib/format.js';
 import { remove, save } from '../lib/store.js';
 import { useData, useUI } from '../state.jsx';
@@ -15,7 +15,7 @@ import { useData, useUI } from '../state.jsx';
 export function CalendarPage() {
     const data = useData();
     const ui = useUI();
-    const { today, profile, transactions, recurrences, knownTxIds, activeAccounts } = data;
+    const { today, profile, transactions, recurrences, knownTxIds, workLedger } = data;
     const isDaily = profile.mode === 'daily';
     const rate = Number(profile.dailyRate) || 0;
 
@@ -71,15 +71,12 @@ export function CalendarPage() {
         }
         const id = workdayId(date);
         if (transactions.some((t) => t.id === id)) {
+            if (!(await confirmPaidWorkday(ui, workLedger.byId.get(id)))) return;
             await remove('transactions', id);
             if (!quick) ui.toast('Dia desmarcado.', 'info');
         } else {
-            await save('transactions', {
-                id, type: 'income', amount: rate, description: 'Dia trabalhado', date, source: 'workday',
-                categoryId: CATEGORY_IDS.work,
-                accountId: defaultAccountId({ accounts: activeAccounts, profile, type: 'income', preferredId: profile.workAccountId || DEFAULT_ACCOUNT_ID }),
-            });
-            if (!quick) ui.toast(`Dia marcado: + ${money(rate)}`, 'success');
+            await save('transactions', buildWorkday(date, rate));
+            if (!quick) ui.toast(`Dia marcado: + ${money(rate)} a receber`, 'success');
         }
     }
 
@@ -97,6 +94,7 @@ export function CalendarPage() {
     const receipt = dailyReceipt(transactions, month);
     const totals = monthTotals(transactions, month);
     const selectedInMonth = selected.startsWith(month);
+    const monthPending = workLedger.days.filter((d) => d.date.startsWith(month)).reduce((acc, d) => acc + d.remaining, 0);
 
     return (
         <div className="page">
@@ -116,15 +114,17 @@ export function CalendarPage() {
                         {cells.map((cell) => {
                             const info = byDay.get(cell.date);
                             const day = Number(cell.date.slice(8, 10));
+                            const status = info?.worked ? workLedger.byId.get(workdayId(cell.date))?.status : null;
                             const cls = [
                                 'cal-day',
                                 cell.other && 'other',
                                 cell.date === today && 'today',
                                 !cell.other && info?.worked && 'worked',
+                                !cell.other && status && status !== 'paid' && 'unpaid',
                                 !cell.other && selected === cell.date && !quick && 'selected',
                             ].filter(Boolean).join(' ');
                             const labelParts = [longDate(cell.date)];
-                            if (info?.worked) labelParts.push('trabalhado');
+                            if (info?.worked) labelParts.push(`trabalhado, ${status === 'paid' ? 'pago' : status === 'partial' ? 'parcialmente pago' : 'a receber'}`);
                             if (info?.expense) labelParts.push(`gastos ${money(info.expense)}`);
                             if (info?.planned.length) labelParts.push(`${info.planned.length} previsto(s)`);
                             return (
@@ -145,7 +145,8 @@ export function CalendarPage() {
                         })}
                     </div>
                     <div className="cal-legend">
-                        {isDaily && <span><i style={{ background: 'var(--green)' }} /> Trabalhado</span>}
+                        {isDaily && <span><i style={{ background: 'var(--green)' }} /> Trabalhado e pago</span>}
+                        {isDaily && <span><i style={{ background: 'var(--green-wash)', border: '1.5px dashed var(--green)' }} /> A receber</span>}
                         <span><i style={{ border: '2px solid var(--gold)' }} /> Hoje</span>
                         <span><i style={{ background: 'var(--red)', borderRadius: '50%' }} /> Gastos</span>
                         <span><i style={{ border: '1.5px solid var(--gold)', borderRadius: '50%' }} /> Previsto</span>
@@ -172,6 +173,12 @@ export function CalendarPage() {
                         )}
                         <div className="receipt-row"><span>Receitas</span><strong className="pos">{money(totals.income)}</strong></div>
                         <div className="receipt-row"><span>Despesas</span><strong>{money(totals.expense)}</strong></div>
+                        {isDaily && (
+                            <>
+                                <div className="receipt-row muted"><span>Já recebido das diárias do mês</span><strong>{money(receipt.gross - monthPending)}</strong></div>
+                                <div className="receipt-row muted"><span>Falta receber do mês</span><strong>{money(monthPending)}</strong></div>
+                            </>
+                        )}
                         <div className="receipt-divider" />
                         <div className="receipt-row total"><span>Resultado</span><strong className={totals.net < 0 ? 'neg' : ''}>{money(totals.net)}</strong></div>
                     </div>

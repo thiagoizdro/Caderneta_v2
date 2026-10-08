@@ -1,4 +1,5 @@
 import { COLLECTIONS, META_FIELDS, db } from './db.js';
+import { PAYMENT_METHODS, RECEIVABLE_ID } from './defaults.js';
 import { importLegacyData } from './bootstrap.js';
 import { isLegacyBackup } from './legacy.js';
 import { saveMany } from './store.js';
@@ -40,14 +41,14 @@ const csvCell = (v) => {
 /** CSV com ponto e vírgula e vírgula decimal: abre direto no Excel/Sheets em português. */
 export function exportTransactionsCsv(transactions, { categories, accounts }) {
     const cat = new Map(categories.map((c) => [c.id, c.name]));
-    const acc = new Map(accounts.map((a) => [a.id, a.name]));
+    const acc = new Map([...accounts.map((a) => [a.id, a.name]), [RECEIVABLE_ID, 'A receber (empresa)']]);
     const types = { income: 'Receita', expense: 'Despesa', transfer: 'Transferência' };
     const header = ['Data', 'Tipo', 'Descrição', 'Categoria', 'Conta', 'Conta destino', 'Terceiro', 'Valor', 'Parcela'];
     const rows = [...transactions]
         .sort((a, b) => (a.date < b.date ? -1 : 1))
         .map((t) => [
             t.date.split('-').reverse().join('/'),
-            types[t.type] || t.type,
+            t.source === 'workpayment' ? `Pagamento de diárias (${PAYMENT_METHODS[t.method] || '-'})` : types[t.type] || t.type,
             t.description,
             cat.get(t.categoryId) || '',
             acc.get(t.accountId) || '',

@@ -3,6 +3,7 @@ import { createContext, useContext, useEffect, useMemo, useState, useSyncExterna
 import { COLLECTIONS, db } from './lib/db.js';
 import { todayISO } from './lib/dates.js';
 import { PROFILE_ID } from './lib/defaults.js';
+import { workdayLedger } from './lib/finance.js';
 import { getSyncState, subscribeSync } from './lib/sync.js';
 
 // ------------------------------------------------------------
@@ -50,6 +51,8 @@ export function DataProvider({ children }) {
             categories: categoriesAll.filter((c) => !c.archived),
             allCategories: categoriesAll,
             transactions,
+            // Diárias trabalhadas × pagamentos recebidos (status, totais, histórico).
+            workLedger: workdayLedger(transactions),
             recurrences: alive(raw.recurrences),
             goals: alive(raw.goals).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)),
             goalDeposits: alive(raw.goalDeposits),
