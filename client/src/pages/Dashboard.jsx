@@ -5,12 +5,13 @@ import { useMemo } from 'react';
 import { Topbar } from '../components/Topbar.jsx';
 import { BalanceChart, CategoryBars, IncomeExpenseChart } from '../components/Charts.jsx';
 import { Icon } from '../components/Icon.jsx';
+import { confirmPaidWorkday } from '../components/PaymentForm.jsx';
 import { TransactionRow } from '../components/TransactionForm.jsx';
 import { AnimatedMoney, CategoryIcon, Delta, EmptyState } from '../components/ui.jsx';
 import { addMonthsToMonth, clampedDate, lastMonths, monthLabel, monthOf, splitMonth } from '../lib/dates.js';
-import { CATEGORY_IDS, DEFAULT_ACCOUNT_ID } from '../lib/defaults.js';
+import { CATEGORY_IDS } from '../lib/defaults.js';
 import {
-    balanceSeries, cashBalance, dailyReceipt, defaultAccountId, expensesByCategory, forecastMonthEnd, isCredit, monthTotals,
+    balanceSeries, buildWorkday, cashBalance, dailyReceipt, expensesByCategory, forecastMonthEnd, isCredit, monthTotals,
     monthlyReceipt, monthlySeries, topExpenses, upcomingCommitments, workdayId,
 } from '../lib/finance.js';
 import { money, relativeDay } from '../lib/format.js';
@@ -29,7 +30,7 @@ function Kpi({ label, icon: I, value, foot, hero = false }) {
 }
 
 function DailyReceiptCard({ ym }) {
-    const { transactions, profile, today, activeAccounts } = useData();
+    const { transactions, profile, today, workLedger } = useData();
     const ui = useUI();
     const r = dailyReceipt(transactions, ym);
     const workedToday = transactions.some((t) => t.id === workdayId(today));
@@ -37,16 +38,15 @@ function DailyReceiptCard({ ym }) {
 
     async function toggleToday() {
         if (workedToday) {
+            if (!(await confirmPaidWorkday(ui, workLedger.byId.get(workdayId(today))))) return;
             await remove('transactions', workdayId(today));
             ui.toast('Dia de hoje desmarcado.', 'info');
         } else {
-            await save('transactions', {
-                id: workdayId(today), type: 'income', amount: rate, description: 'Dia trabalhado', date: today,
-                categoryId: CATEGORY_IDS.work, accountId: defaultAccountId({ accounts: activeAccounts, profile, type: 'income', preferredId: profile.workAccountId || DEFAULT_ACCOUNT_ID }), source: 'workday',
-            });
-            ui.toast(`Dia marcado: + ${money(rate)}`, 'success');
+            await save('transactions', buildWorkday(today, rate));
+            ui.toast(`Dia marcado: + ${money(rate)} a receber`, 'success');
         }
     }
+    const { pending, credit } = workLedger.totals;
 
     return (
         <div className="card receipt">
@@ -58,6 +58,12 @@ function DailyReceiptCard({ ym }) {
             <div className="receipt-row total"><span>Saldo líquido</span><strong>{money(r.net)}</strong></div>
             {r.thirdParty > 0 && <div className="receipt-row muted"><span>Repassado a terceiros</span><strong>− {money(r.thirdParty)}</strong></div>}
             <div className="receipt-row total gold"><span>Saldo real (seu)</span><strong>{money(r.real)}</strong></div>
+            <div className="receipt-divider" />
+            <a className="receipt-row" href="#/diarias" style={{ textDecoration: 'none' }}>
+                <span>A receber da empresa (todas as diárias)</span>
+                <strong>{money(pending)} <ChevronRight size={14} aria-hidden="true" /></strong>
+            </a>
+            {credit > 0 && <div className="receipt-row muted"><span>Crédito com a empresa</span><strong>{money(credit)}</strong></div>}
             <button className={`btn btn-block mt ${workedToday ? 'btn-secondary' : 'btn-primary'}`} onClick={toggleToday}>
                 <CalendarCheck size={17} /> {workedToday ? 'Hoje já está marcado — desmarcar' : 'Marcar hoje como trabalhado'}
             </button>
@@ -156,7 +162,13 @@ export function Dashboard() {
             <Topbar eyebrow={`${monthLabel(ym)} · ${profile.mode === 'daily' ? 'Modo Diária' : 'Salário Mensal'}`} title={firstName ? `Olá, ${firstName}` : 'Seu painel'} />
 
             <section className="kpis" aria-label="Resumo do mês">
-                <Kpi hero label="Saldo atual" icon={Wallet} value={view.current} foot={`em ${view.cashAccounts} ${view.cashAccounts === 1 ? 'conta' : 'contas'}`} />
+                <Kpi
+                    hero
+                    label="Saldo atual"
+                    icon={Wallet}
+                    value={view.current}
+                    foot={`em ${view.cashAccounts} ${view.cashAccounts === 1 ? 'conta' : 'contas'}${data.workLedger.totals.pending > 0 ? ` · fora ${money(data.workLedger.totals.pending)} a receber` : ''}`}
+                />
                 <Kpi
                     label="Receitas do mês"
                     icon={ArrowUpRight}

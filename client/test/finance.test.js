@@ -2,12 +2,13 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { suggestCategory } from '../src/lib/categorize.js';
 import { addMonths, clampedDate, lastMonths } from '../src/lib/dates.js';
-import { CATEGORY_IDS, DEFAULT_ACCOUNT_ID, SALARY_RECURRENCE_ID } from '../src/lib/defaults.js';
+import { CATEGORY_IDS, DEFAULT_ACCOUNT_ID, RECEIVABLE_ID, SALARY_RECURRENCE_ID } from '../src/lib/defaults.js';
 import { parseAmount } from '../src/lib/format.js';
 import {
-    accountBalances, budgetStatus, buildInstallments, cardSummary, cashBalance, dailyReceipt,
+    accountBalances, budgetStatus, buildInstallments, buildWorkday, cardSummary, cashBalance, dailyReceipt,
     dueRecurrenceTxs, forecastMonthEnd, goalProgress, installmentGroups, invoiceMonthFor,
     invoicePeriod, monthTotals, monthlyReceipt, recurrenceDates, splitInstallments, upcomingCommitments,
+    validateWorkPayment, workdayLedger,
 } from '../src/lib/finance.js';
 import { buildInsights } from '../src/lib/insights.js';
 import { convertLegacy, readLegacyStorage } from '../src/lib/legacy.js';
@@ -311,5 +312,97 @@ describe('insights de cartão', () => {
         const ids = insights.map((i) => i.id);
         assert.equal(new Set(ids).size, ids.length);
         assert.match(insights.find((i) => i.id === 'inv-late-c').text, /2 faturas do Cartão estão vencidas, somando R\$ 240,00/);
+    });
+});
+
+describe('diárias e pagamentos', () => {
+    const day = (date, amount = 100, fields = {}) => ({ ...buildWorkday(date, amount), ...fields });
+    const pay = (id, amount, date, fields = {}) => ({
+        id, type: 'transfer', source: 'workpayment', amount, date, accountId: RECEIVABLE_ID, toAccountId: 'b',
+        description: 'Pagamento de diárias', method: 'pix', workdayIds: [], ...fields,
+    });
+    // 12 diárias de R$ 100 = R$ 1.200,00
+    const twelve = Array.from({ length: 12 }, (_, i) => day(`2026-09-${String(i + 1).padStart(2, '0')}`));
+
+    test('exemplo do escopo: 1.200 trabalhados, 700 recebidos, 500 a receber; +100 → 800 e 400', () => {
+        const txs = [...twelve, pay('p1', 700, '2026-09-15')];
+        const before = workdayLedger(txs).totals;
+        assert.equal(before.worked, 1200);
+        assert.equal(before.received, 700);
+        assert.equal(before.pending, 500);
+
+        const after = workdayLedger([...txs, pay('p2', 100, '2026-09-20')]).totals;
+        assert.equal(after.worked, 1200);
+        assert.equal(after.received, 800);
+        assert.equal(after.pending, 400);
+    });
+
+    test('status por diária: paga, parcialmente paga e pendente', () => {
+        const ledger = workdayLedger([day('2026-09-01'), day('2026-09-02'), day('2026-09-03'), pay('p', 150, '2026-09-10')]);
+        assert.deepEqual(ledger.days.map((d) => [d.date, d.status, d.paid]), [
+            ['2026-09-01', 'paid', 100],
+            ['2026-09-02', 'partial', 50],
+            ['2026-09-03', 'pending', 0],
+        ]);
+        assert.deepEqual(ledger.payments[0].allocations.map((a) => a.amount), [100, 50]);
+    });
+
+    test('pagamento vinculado quita as diárias escolhidas, mesmo de outro período', () => {
+        const txs = [day('2026-08-30', 120), day('2026-09-01'), day('2026-09-02'),
+            pay('p', 200, '2026-09-10', { workdayIds: ['workday:2026-09-02', 'workday:2026-09-01'] })];
+        const ledger = workdayLedger(txs);
+        assert.equal(ledger.byId.get('workday:2026-08-30').status, 'pending');
+        assert.equal(ledger.byId.get('workday:2026-09-01').status, 'paid');
+        assert.equal(ledger.byId.get('workday:2026-09-02').status, 'paid');
+        assert.equal(ledger.totals.pending, 120);
+    });
+
+    test('pagamento sem vínculo não "rouba" a diária escolhida por outro', () => {
+        const txs = [day('2026-09-01'), day('2026-09-02'),
+            pay('geral', 100, '2026-09-05'),
+            pay('vinc', 100, '2026-09-06', { workdayIds: ['workday:2026-09-01'] })];
+        const ledger = workdayLedger(txs);
+        assert.deepEqual(ledger.payments.find((p) => p.tx.id === 'vinc').allocations.map((a) => a.id), ['workday:2026-09-01']);
+        assert.deepEqual(ledger.payments.find((p) => p.tx.id === 'geral').allocations.map((a) => a.id), ['workday:2026-09-02']);
+        assert.equal(ledger.totals.pending, 0);
+    });
+
+    test('excluir uma diária paga redistribui o pagamento ou vira crédito', () => {
+        const txs = [day('2026-09-01'), day('2026-09-02'), pay('p', 100, '2026-09-05', { workdayIds: ['workday:2026-09-01'] })];
+        const redistributed = workdayLedger(txs.filter((t) => t.id !== 'workday:2026-09-01'));
+        assert.equal(redistributed.byId.get('workday:2026-09-02').status, 'paid');
+        assert.equal(redistributed.totals.credit, 0);
+
+        const credit = workdayLedger([day('2026-09-02', 60), pay('p', 100, '2026-09-05')]);
+        assert.equal(credit.totals.pending, 0);
+        assert.equal(credit.totals.credit, 40);
+    });
+
+    test('diárias antigas (lançadas direto na conta) contam como recebidas', () => {
+        const legacyDay = day('2026-08-01', 150, { accountId: 'w' });
+        const ledger = workdayLedger([legacyDay, day('2026-09-01')]);
+        assert.equal(ledger.byId.get(legacyDay.id).status, 'paid');
+        assert.equal(ledger.totals.received, 150);
+        assert.equal(ledger.totals.pending, 100);
+    });
+
+    test('saldo a receber fica fora do dinheiro em contas e não duplica receita', () => {
+        const txs = [...twelve, pay('p1', 700, '2026-09-15')];
+        // Só o pagamento entra no saldo do banco (1.000 iniciais + 700).
+        assert.equal(cashBalance([wallet, bank], txs, '2026-09-30'), 100 + 1700);
+        // A receita do mês são as diárias (1.200); o pagamento não soma de novo.
+        assert.equal(monthTotals(txs, '2026-09').income, 1200);
+        assert.equal(dailyReceipt(txs, '2026-09').gross, 1200);
+        assert.equal(dailyReceipt(txs, '2026-09').otherIncome, 0);
+    });
+
+    test('validação: valor positivo e até o saldo pendente (sem adiantamento)', () => {
+        const ledger = workdayLedger([...twelve, pay('p1', 700, '2026-09-15')]);
+        assert.equal(validateWorkPayment(ledger, { amount: 100 }), null);
+        assert.equal(validateWorkPayment(ledger, { amount: 500 }), null);
+        assert.match(validateWorkPayment(ledger, { amount: 500.01 }), /saldo a receber \(R\$ 500,00\)/);
+        assert.match(validateWorkPayment(ledger, { amount: 0 }), /maior que zero/);
+        assert.match(validateWorkPayment(ledger, { amount: 150, workdayIds: ['workday:2026-09-12'] }), /diárias escolhidas \(R\$ 100,00\)/);
+        assert.match(validateWorkPayment(workdayLedger([day('2026-09-01'), pay('x', 100, '2026-09-02')]), { amount: 1 }), /todas as diárias já estão pagas/);
     });
 });

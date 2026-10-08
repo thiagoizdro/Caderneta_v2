@@ -6,7 +6,8 @@ import {
     addDays, addMonths, addMonthsToMonth, clampedDate, daysInMonth, diffDays,
     endOfMonth, monthOf, splitMonth, startOfMonth,
 } from './dates.js';
-import { round2 } from './format.js';
+import { CATEGORY_IDS, RECEIVABLE_ID } from './defaults.js';
+import { money as fmtMoney, round2 } from './format.js';
 
 // ------------------------------------------------------------
 // Básico
@@ -115,6 +116,140 @@ export function topExpenses(txs, ym, limit = 5, upTo = null) {
 export const workdayId = (date) => `workday:${date}`;
 
 export const isWorkday = (t) => t.source === 'workday';
+
+/** Diária marcada no calendário: fica a receber até a empresa pagar. */
+export function buildWorkday(date, rate) {
+    return {
+        id: workdayId(date), type: 'income', amount: round2(rate), description: 'Dia trabalhado', date,
+        source: 'workday', categoryId: CATEGORY_IDS.work, accountId: RECEIVABLE_ID,
+    };
+}
+
+// ------------------------------------------------------------
+// Pagamentos de diárias
+// ------------------------------------------------------------
+//
+// A diária é a receita (o que foi trabalhado). O pagamento é só o dinheiro
+// chegando: uma transferência da "conta" a receber para uma conta real. Assim
+// ele entra no saldo sem contar de novo como receita.
+//
+// Diárias registradas antes deste controle entraram direto numa conta
+// (accountId real) e contam como já recebidas.
+
+export const isWorkPayment = (t) => t.source === 'workpayment';
+
+export const isReceivableWorkday = (t) => isWorkday(t) && t.accountId === RECEIVABLE_ID;
+
+export const WORKDAY_STATUS = { pending: 'Pendente', partial: 'Parcialmente paga', paid: 'Paga' };
+
+const cents = (v) => Math.round((Number(v) || 0) * 100);
+const byDate = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.createdAt || 0) - (b.createdAt || 0) || (a.id < b.id ? -1 : 1));
+
+/**
+ * Situação das diárias e dos pagamentos.
+ *
+ * 1. Cada pagamento quita primeiro as diárias escolhidas nele (mais antigas antes).
+ * 2. O que sobra, e os pagamentos sem diárias escolhidas, quitam as diárias
+ *    pendentes mais antigas.
+ * 3. Se ainda sobrar (ex.: uma diária paga foi excluída), vira crédito.
+ *
+ * Tudo é recalculado a partir dos registros: editar ou excluir uma diária ou
+ * um pagamento nunca deixa o histórico inconsistente.
+ */
+export function workdayLedger(txs) {
+    const days = txs.filter(isWorkday).sort(byDate);
+    const payments = txs.filter(isWorkPayment).sort(byDate);
+
+    const entries = new Map(days.map((t) => {
+        const amount = cents(t.amount);
+        const direct = !isReceivableWorkday(t);
+        return [t.id, { tx: t, amount, paid: direct ? amount : 0, direct, payments: [] }];
+    }));
+    const allocations = new Map(payments.map((p) => [p.id, []]));
+    const give = (entry, payment, value) => {
+        entry.paid += value;
+        entry.payments.push({ id: payment.id, amount: value / 100 });
+        allocations.get(payment.id).push({ id: entry.tx.id, date: entry.tx.date, amount: value / 100 });
+    };
+
+    const leftovers = [];
+    for (const p of payments) {
+        let rest = Math.max(cents(p.amount), 0);
+        const linked = (p.workdayIds || []).map((id) => entries.get(id)).filter(Boolean).sort((a, b) => byDate(a.tx, b.tx));
+        for (const e of linked) {
+            const take = Math.min(rest, e.amount - e.paid);
+            if (take > 0) { give(e, p, take); rest -= take; }
+        }
+        leftovers.push([p, rest]);
+    }
+    const queue = [...entries.values()];
+    let credit = 0;
+    for (const [p, amount] of leftovers) {
+        let rest = amount;
+        for (const e of queue) {
+            if (!rest) break;
+            const take = Math.min(rest, e.amount - e.paid);
+            if (take > 0) { give(e, p, take); rest -= take; }
+        }
+        credit += rest;
+    }
+
+    const list = [...entries.values()].map((e) => ({
+        id: e.tx.id,
+        tx: e.tx,
+        date: e.tx.date,
+        amount: e.amount / 100,
+        paid: e.paid / 100,
+        remaining: (e.amount - e.paid) / 100,
+        direct: e.direct,
+        payments: e.payments,
+        status: e.paid >= e.amount ? 'paid' : e.paid > 0 ? 'partial' : 'pending',
+    }));
+
+    const worked = days.reduce((acc, t) => acc + cents(t.amount), 0);
+    const direct = list.filter((e) => e.direct).reduce((acc, e) => acc + cents(e.amount), 0);
+    const paidOut = payments.reduce((acc, p) => acc + cents(p.amount), 0);
+    const received = direct + paidOut;
+    const pending = list.reduce((acc, e) => acc + cents(e.remaining), 0);
+
+    return {
+        days: list,
+        byId: new Map(list.map((e) => [e.id, e])),
+        payments: payments.map((p) => ({ tx: p, allocations: allocations.get(p.id) })),
+        totals: {
+            worked: worked / 100,
+            received: received / 100,
+            paidOut: paidOut / 100,
+            direct: direct / 100,
+            // Saldo a receber = total de diárias − total recebido (nunca negativo).
+            pending: pending / 100,
+            credit: credit / 100,
+            count: list.length,
+            pendingCount: list.filter((e) => e.status !== 'paid').length,
+        },
+    };
+}
+
+/**
+ * Regras do registro de pagamento. `ledger` deve ser calculado SEM o pagamento
+ * que está sendo editado. Devolve a mensagem de erro, ou null se estiver tudo certo.
+ */
+export function validateWorkPayment(ledger, { amount, workdayIds = [] }) {
+    const value = cents(amount);
+    if (!(value > 0)) return 'Informe um valor maior que zero.';
+    const pending = cents(ledger.totals.pending);
+    if (pending <= 0) return 'Não há saldo a receber: todas as diárias já estão pagas.';
+    if (value > pending) {
+        return `O valor passa do saldo a receber (${fmtMoney(pending / 100)}). Pagamentos adiantados não são aceitos.`;
+    }
+    if (workdayIds.length) {
+        const selected = workdayIds.reduce((acc, id) => acc + cents(ledger.byId.get(id)?.remaining), 0);
+        if (value > selected) {
+            return `O valor passa do que falta nas diárias escolhidas (${fmtMoney(selected / 100)}). Escolha mais diárias ou deixe sem seleção.`;
+        }
+    }
+    return null;
+}
 
 /** O "recibo" do modo Diária: bruto dos dias trabalhados, gastos pessoais e repasses a terceiros. */
 export function dailyReceipt(txs, ym) {
