@@ -596,8 +596,11 @@ export function forecastMonthEnd({ accounts, txs, recurrences, settings = {}, to
     return { current, scheduled, recurring, cardDue, variable, work, end: endBalance, endDate: end, daysLeft, pendingCount: pending.length };
 }
 
-/** Compromissos dos próximos dias: recorrências, lançamentos agendados e faturas. */
-export function upcomingCommitments({ accounts, txs, recurrences, today, days = 7 }) {
+/**
+ * Compromissos dos próximos dias: recorrências, lançamentos agendados, faturas
+ * e contas a pagar em aberto (`bills` = entradas de billsLedger).
+ */
+export function upcomingCommitments({ accounts, txs, recurrences, today, days = 7, bills = [] }) {
     const to = addDays(today, days);
     const from = addDays(today, 1);
     const knownIds = new Set(txs.map((t) => t.id));
@@ -617,6 +620,11 @@ export function upcomingCommitments({ accounts, txs, recurrences, today, days = 
             if (inv.due >= today && inv.due <= to && inv.remaining > 0) {
                 items.push({ key: `inv:${card.id}:${inv.ym}`, date: inv.due, description: `Fatura ${card.name}`, amount: inv.remaining, type: 'expense', kind: 'invoice', accountId: card.id });
             }
+        }
+    }
+    for (const e of bills) {
+        if (e.status !== 'paid' && e.bill.dueDate >= today && e.bill.dueDate <= to) {
+            items.push({ key: `bill:${e.id}`, date: e.bill.dueDate, description: e.bill.description, amount: e.remaining, type: 'expense', kind: 'bill', billId: e.id });
         }
     }
     return items.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
@@ -650,4 +658,162 @@ export function goalProgress(goal, deposits, today) {
     }
 
     return { saved, target, remaining, ratio, monthlyAvg, eta, neededPerMonth, done: target > 0 && saved >= target, deposits: own };
+}
+
+// ------------------------------------------------------------
+// Contas a pagar
+// ------------------------------------------------------------
+//
+// A conta (bill) é só o compromisso: cadastrar, editar ou excluir uma conta
+// não mexe em saldo nenhum.
+//
+// O pagamento é o que tira dinheiro das contas. Cada pagamento tem no máximo
+// um lançamento ligado (id `billpay:<pagamento>`), conforme `mode`:
+//   expense  — despesa na conta escolhida (o caso comum: boleto, mensalidade)
+//   transfer — transferência para um cartão: pagar a fatura cujas compras já
+//              estão lançadas não pode virar uma segunda despesa
+//   none     — sem lançamento: a despesa já existe em Lançamentos
+//              (ex.: gerada por uma recorrência)
+//
+// A reserva é dinheiro separado *dentro* das contas: depósitos e retiradas
+// não criam lançamentos e não mudam o saldo. Quando um pagamento usa a
+// reserva (`fromReserve`), ela diminui junto com o saldo. Assim o mesmo
+// dinheiro nunca é contado nem descontado duas vezes.
+
+export const BILL_STATUS = { pending: 'Pendente', partial: 'Parcialmente paga', paid: 'Paga', overdue: 'Vencida' };
+
+/** Até quantos dias antes do vencimento a conta aparece como "vence em breve". */
+export const BILL_SOON_DAYS = 5;
+
+export const billPaymentTxId = (paymentId) => `billpay:${paymentId}`;
+
+export const isBillPayment = (t) => t.source === 'billpayment';
+
+const billOrder = (a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : String(a.description).localeCompare(String(b.description), 'pt-BR'));
+
+/**
+ * Situação de todas as contas, da reserva e dos totais.
+ * Status: paga (nada pendente), vencida (passou do vencimento com saldo),
+ * parcialmente paga (algum pagamento) ou pendente.
+ */
+export function billsLedger({ bills = [], payments = [], reserveMoves = [] }, today) {
+    const byBill = new Map(bills.map((b) => [b.id, []]));
+    for (const p of payments) byBill.get(p.billId)?.push(p);
+
+    const list = [...bills].sort(billOrder).map((bill) => {
+        const own = byBill.get(bill.id).sort(byDate);
+        const amount = cents(bill.amount);
+        const paid = own.reduce((acc, p) => acc + cents(p.amount), 0);
+        const remaining = Math.max(amount - paid, 0);
+        const daysLeft = diffDays(today, bill.dueDate);
+        const status = remaining <= 0 ? 'paid' : daysLeft < 0 ? 'overdue' : paid > 0 ? 'partial' : 'pending';
+        return {
+            id: bill.id,
+            bill,
+            amount: amount / 100,
+            paid: paid / 100,
+            remaining: remaining / 100,
+            daysLeft,
+            status,
+            soon: status !== 'paid' && status !== 'overdue' && daysLeft <= BILL_SOON_DAYS,
+            payments: own,
+        };
+    });
+
+    const deposited = reserveMoves.reduce((acc, m) => acc + cents(m.amount), 0);
+    const used = payments.reduce((acc, p) => acc + cents(p.fromReserve), 0);
+    const reserve = deposited - used;
+    const open = list.filter((e) => e.status !== 'paid');
+    const pending = open.reduce((acc, e) => acc + cents(e.remaining), 0);
+    const overdue = open.filter((e) => e.status === 'overdue');
+
+    return {
+        bills: list,
+        byId: new Map(list.map((e) => [e.id, e])),
+        totals: {
+            // Total a pagar: o que falta em todas as contas não pagas.
+            pending: pending / 100,
+            reserve: reserve / 100,
+            // Falta juntar = total a pagar − reserva (nunca negativo).
+            missing: Math.max(pending - reserve, 0) / 100,
+            surplus: Math.max(reserve - pending, 0) / 100,
+            coverage: pending > 0 ? Math.min(Math.max(reserve, 0) / pending, 1) : 1,
+            openCount: open.length,
+            overdue: overdue.reduce((acc, e) => acc + cents(e.remaining), 0) / 100,
+            overdueCount: overdue.length,
+            soonCount: open.filter((e) => e.soon).length,
+        },
+    };
+}
+
+/** Soma dos pagamentos de contas feitos no mês. */
+export function billsPaidInMonth(payments, ym) {
+    return payments.filter((p) => inMonth(p, ym)).reduce((acc, p) => acc + cents(p.amount), 0) / 100;
+}
+
+/**
+ * Regras do pagamento de uma conta. `entry` e `reserve` devem ser calculados
+ * SEM o pagamento que está sendo editado. Devolve a mensagem de erro ou null.
+ */
+export function validateBillPayment(entry, reserve, { amount, fromReserve = 0 }) {
+    const value = cents(amount);
+    const reserved = cents(fromReserve);
+    if (!(value > 0)) return 'Informe um valor maior que zero.';
+    const remaining = cents(entry?.remaining);
+    if (remaining <= 0) return 'Esta conta já está paga.';
+    if (value > remaining) return `O valor passa do que falta pagar nesta conta (${fmtMoney(remaining / 100)}).`;
+    if (reserved < 0) return 'O valor usado da reserva não pode ser negativo.';
+    if (reserved > value) return 'O valor usado da reserva não pode passar do valor pago.';
+    if (reserved > Math.max(cents(reserve), 0)) return `A reserva tem só ${fmtMoney(Math.max(cents(reserve), 0) / 100)}.`;
+    return null;
+}
+
+/** Lançamento ligado a um pagamento de conta (null quando `mode` é "none"). */
+export function buildBillPaymentTx(payment, bill) {
+    if (!payment.mode || payment.mode === 'none') return null;
+    const base = {
+        id: billPaymentTxId(payment.id),
+        source: 'billpayment',
+        billId: bill.id,
+        paymentId: payment.id,
+        amount: round2(payment.amount),
+        date: payment.date,
+        description: bill.description,
+        notes: payment.notes || '',
+        person: '',
+    };
+    return payment.mode === 'transfer'
+        ? { ...base, type: 'transfer', accountId: payment.accountId, toAccountId: payment.toAccountId, categoryId: null }
+        : { ...base, type: 'expense', accountId: payment.accountId, toAccountId: null, categoryId: payment.categoryId || CATEGORY_IDS.other };
+}
+
+/** Próxima competência de uma conta mensal (id determinístico: não duplica entre aparelhos). */
+export function nextBillOccurrence(bill) {
+    const seriesId = bill.seriesId || bill.id;
+    const dueDay = Number(bill.dueDay) || Number(bill.dueDate.slice(8, 10));
+    const ym = addMonthsToMonth(monthOf(bill.dueDate), 1);
+    const { year, month } = splitMonth(ym);
+    // eslint-disable-next-line no-unused-vars
+    const { id, createdAt, updatedAt, deleted, _pending, ...fields } = bill;
+    return { ...fields, id: `${seriesId}:${ym}`, seriesId, dueDay, dueDate: clampedDate(year, month, dueDay) };
+}
+
+/**
+ * Contas mensais a gerar: quando a competência mais recente de uma série está
+ * paga, nasce a do mês seguinte. `knownIds` inclui as excluídas: excluir a
+ * próxima competência encerra a série em vez de recriá-la.
+ */
+export function dueRecurringBills(ledger, knownIds) {
+    const latest = new Map();
+    for (const e of ledger.bills) {
+        const series = e.bill.seriesId || e.bill.id;
+        if (!latest.has(series) || e.bill.dueDate > latest.get(series).bill.dueDate) latest.set(series, e);
+    }
+    const out = [];
+    for (const e of latest.values()) {
+        if (e.bill.recurrence !== 'monthly' || e.status !== 'paid') continue;
+        const next = nextBillOccurrence(e.bill);
+        if (!knownIds.has(next.id)) out.push(next);
+    }
+    return out;
 }

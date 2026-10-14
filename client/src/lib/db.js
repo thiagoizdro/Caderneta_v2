@@ -1,7 +1,10 @@
 import Dexie from 'dexie';
 
 // Coleções sincronizadas com o servidor (mesma lista de server/src/sync.js).
-export const COLLECTIONS = ['settings', 'accounts', 'categories', 'transactions', 'recurrences', 'goals', 'goalDeposits'];
+export const COLLECTIONS = [
+    'settings', 'accounts', 'categories', 'transactions', 'recurrences', 'goals', 'goalDeposits',
+    'bills', 'billPayments', 'reserveMoves',
+];
 
 // Campos de controle guardados junto de cada registro, mas que não são "dados":
 //   updatedAt — relógio da última alteração (resolve conflitos)
@@ -20,6 +23,13 @@ db.version(1).stores({
     goals: 'id, _pending',
     goalDeposits: 'id, goalId, _pending',
     meta: 'key',
+});
+
+// Contas a pagar: contas, pagamentos de contas e movimentos da reserva.
+db.version(2).stores({
+    bills: 'id, _pending, seriesId',
+    billPayments: 'id, billId, _pending',
+    reserveMoves: 'id, _pending',
 });
 
 export async function getMeta(key, fallback = null) {

@@ -11,6 +11,9 @@ export const COLLECTIONS = [
     'recurrences',
     'goals',
     'goalDeposits',
+    'bills',
+    'billPayments',
+    'reserveMoves',
 ];
 
 export const MAX_PUSH = 1000;

@@ -428,6 +428,7 @@ export function TransactionRow({ tx, onClick, showDate = false }) {
                     {tx.person && <span className="tag gold">{tx.person}</span>}
                     {tx.installment && <span className="tag">{tx.installment.index}/{tx.installment.total}</span>}
                     {tx.source === 'recurrence' && <span className="tag blue">Recorrente</span>}
+                    {tx.source === 'billpayment' && <span className="tag gold">Conta a pagar</span>}
                     {future && <span className="tag">Agendado</span>}
                 </span>
             </span>

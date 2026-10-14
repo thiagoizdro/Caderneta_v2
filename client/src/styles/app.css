@@ -203,6 +203,7 @@ a { color: inherit; }
 .field + .field, .field-row + .field, .field + .field-row { margin-top: 14px; }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .field-row + .field-row { margin-top: 14px; }
+.field-row > .field + .field { margin-top: 0; }
 .label { font-size: 12.5px; font-weight: 700; color: var(--ink-soft); }
 .hint { font-size: 12px; color: var(--ink-muted); }
 .input, .select, .textarea {
@@ -694,3 +695,19 @@ button.list-row:hover + .list-row { border-top-color: transparent; }
 .pay-month-head:hover, .pay-day:hover { background: var(--bg-hover); }
 .pay-month-head .num, .pay-day .num { margin-left: auto; text-transform: none; letter-spacing: 0; }
 .pay-days input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--green); flex: none; }
+
+/* ============================================
+   Contas a pagar
+   ============================================ */
+@media (min-width: 1100px) { .bills-layout { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); align-items: start; } }
+.bill-row.overdue { box-shadow: inset 3px 0 0 var(--red); }
+.bill-row.soon { box-shadow: inset 3px 0 0 var(--gold); }
+.bill-row.paid .list-title { color: var(--ink-soft); }
+.bill-due { font-weight: 700; }
+.bill-due.soon { color: var(--gold); }
+.bill-due.late { color: var(--red); }
+.bill-figures { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
+.bill-figures div { display: grid; gap: 2px; padding: 10px 12px; border-radius: 12px; background: var(--bg-sunken); border: 1px solid var(--line); }
+.bill-figures span { font-size: 12px; font-weight: 700; color: var(--ink-muted); }
+.bill-figures b { font-size: 15px; }
+@media (max-width: 719px) { .bill-filters .filter-select { flex: 1 1 140px; min-width: 0; } }

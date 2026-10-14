@@ -3,7 +3,7 @@ import { createContext, useContext, useEffect, useMemo, useState, useSyncExterna
 import { COLLECTIONS, db } from './lib/db.js';
 import { todayISO } from './lib/dates.js';
 import { PROFILE_ID } from './lib/defaults.js';
-import { workdayLedger } from './lib/finance.js';
+import { billsLedger, workdayLedger } from './lib/finance.js';
 import { getSyncState, subscribeSync } from './lib/sync.js';
 
 // ------------------------------------------------------------
@@ -56,6 +56,10 @@ export function DataProvider({ children }) {
             recurrences: alive(raw.recurrences),
             goals: alive(raw.goals).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)),
             goalDeposits: alive(raw.goalDeposits),
+            // Contas a pagar × pagamentos × reserva (status, totais, histórico).
+            billPayments: alive(raw.billPayments),
+            reserveMoves: alive(raw.reserveMoves).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.createdAt || 0) - (b.createdAt || 0))),
+            billLedger: billsLedger({ bills: alive(raw.bills), payments: alive(raw.billPayments), reserveMoves: alive(raw.reserveMoves) }, today),
             accountById: new Map(accountsAll.map((a) => [a.id, a])),
             categoryById: new Map(categoriesAll.map((c) => [c.id, c])),
             // Inclui excluídos: usado para não recriar ocorrências apagadas.

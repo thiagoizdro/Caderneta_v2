@@ -8,7 +8,8 @@ import {
     accountBalances, budgetStatus, buildInstallments, buildWorkday, cardSummary, cashBalance, dailyReceipt,
     dueRecurrenceTxs, forecastMonthEnd, goalProgress, installmentGroups, invoiceMonthFor,
     invoicePeriod, monthTotals, monthlyReceipt, recurrenceDates, splitInstallments, upcomingCommitments,
-    validateWorkPayment, workdayLedger,
+    validateWorkPayment, workdayLedger, billsLedger, billsPaidInMonth, buildBillPaymentTx, dueRecurringBills,
+    nextBillOccurrence, validateBillPayment,
 } from '../src/lib/finance.js';
 import { buildInsights } from '../src/lib/insights.js';
 import { convertLegacy, readLegacyStorage } from '../src/lib/legacy.js';
@@ -404,5 +405,108 @@ describe('diárias e pagamentos', () => {
         assert.match(validateWorkPayment(ledger, { amount: 0 }), /maior que zero/);
         assert.match(validateWorkPayment(ledger, { amount: 150, workdayIds: ['workday:2026-09-12'] }), /diárias escolhidas \(R\$ 100,00\)/);
         assert.match(validateWorkPayment(workdayLedger([day('2026-09-01'), pay('x', 100, '2026-09-02')]), { amount: 1 }), /todas as diárias já estão pagas/);
+    });
+});
+
+describe('contas a pagar', () => {
+    const today = '2026-10-13';
+    const bill = (id, fields) => ({ id, description: id, amount: 100, dueDate: '2026-10-20', category: 'other', recurrence: 'once', ...fields });
+
+    test('exemplo do escopo: total R$ 1.500, reservado R$ 600, falta juntar R$ 900', () => {
+        const l = billsLedger({
+            bills: [bill('faculdade', { amount: 1000 }), bill('internet', { amount: 500 })],
+            reserveMoves: [{ id: 'r1', amount: 600, date: today }],
+        }, today);
+        assert.equal(l.totals.pending, 1500);
+        assert.equal(l.totals.reserve, 600);
+        assert.equal(l.totals.missing, 900);
+        assert.equal(l.totals.coverage, 0.4);
+    });
+
+    test('exemplo do escopo: conta de R$ 800 com pagamento de R$ 300 fica com R$ 500 e histórico', () => {
+        const l = billsLedger({ bills: [bill('carro', { amount: 800 })], payments: [{ id: 'p1', billId: 'carro', amount: 300, date: today }] }, today);
+        const e = l.byId.get('carro');
+        assert.equal(e.remaining, 500);
+        assert.equal(e.status, 'partial');
+        assert.equal(e.payments.length, 1);
+        assert.equal(l.totals.pending, 500);
+    });
+
+    test('status: paga, vencida, vence em breve e dias para vencer', () => {
+        const l = billsLedger({
+            bills: [
+                bill('paga', { amount: 50 }),
+                bill('atrasada', { dueDate: '2026-10-10' }),
+                bill('breve', { dueDate: '2026-10-15' }),
+                bill('longe', { dueDate: '2026-11-30' }),
+            ],
+            payments: [{ id: 'p', billId: 'paga', amount: 50, date: today }],
+        }, today);
+        assert.equal(l.byId.get('paga').status, 'paid');
+        assert.equal(l.byId.get('atrasada').status, 'overdue');
+        assert.equal(l.byId.get('atrasada').daysLeft, -3);
+        assert.equal(l.byId.get('breve').soon, true);
+        assert.equal(l.byId.get('longe').soon, false);
+        assert.equal(l.totals.overdueCount, 1);
+        assert.deepEqual(l.bills.map((e) => e.id), ['atrasada', 'breve', 'paga', 'longe']);
+    });
+
+    test('pagamento usando a reserva diminui a reserva e não a conta duas vezes', () => {
+        const bank2 = { ...bank, initialBalance: 1000 };
+        const b = bill('luz', { amount: 200 });
+        const payment = { id: 'p1', billId: 'luz', amount: 200, fromReserve: 150, date: today, mode: 'expense', accountId: bank2.id, categoryId: CATEGORY_IDS.home };
+        const l = billsLedger({ bills: [b], payments: [payment], reserveMoves: [{ id: 'r', amount: 150, date: today }] }, today);
+        assert.equal(l.totals.reserve, 0);
+        assert.equal(l.totals.pending, 0);
+        const txPay = buildBillPaymentTx(payment, b);
+        assert.equal(txPay.id, 'billpay:p1');
+        assert.equal(txPay.type, 'expense');
+        // Saldo cai uma vez só (depósito na reserva não é lançamento).
+        assert.equal(cashBalance([bank2], [txPay], today), 800);
+    });
+
+    test('fatura do cartão vira transferência e "já lançado" não cria lançamento', () => {
+        const b = bill('fatura', { category: 'card', amount: 300 });
+        const t = buildBillPaymentTx({ id: 'p', amount: 300, date: today, mode: 'transfer', accountId: bank.id, toAccountId: card.id }, b);
+        assert.equal(t.type, 'transfer');
+        assert.equal(monthTotals([t], '2026-10').expense, 0);
+        assert.equal(buildBillPaymentTx({ id: 'q', amount: 300, date: today, mode: 'none' }, b), null);
+    });
+
+    test('valida pagamento acima do pendente e uso indevido da reserva', () => {
+        const l = billsLedger({ bills: [bill('x', { amount: 800 })], payments: [{ id: 'p', billId: 'x', amount: 300, date: today }] }, today);
+        const e = l.byId.get('x');
+        assert.match(validateBillPayment(e, 0, { amount: 600 }), /passa do que falta/);
+        assert.match(validateBillPayment(e, 0, { amount: 0 }), /maior que zero/);
+        assert.match(validateBillPayment(e, 100, { amount: 200, fromReserve: 150 }), /reserva tem só/);
+        assert.match(validateBillPayment(e, 500, { amount: 200, fromReserve: 250 }), /não pode passar do valor pago/);
+        assert.equal(validateBillPayment(e, 500, { amount: 500, fromReserve: 500 }), null);
+        assert.equal(billsPaidInMonth([{ amount: 300, date: '2026-10-01' }, { amount: 50, date: '2026-09-30' }], '2026-10'), 300);
+    });
+
+    test('conta mensal: gera a próxima só depois de paga, sem duplicar', () => {
+        const jan = bill('fac', { recurrence: 'monthly', dueDate: '2027-01-31', dueDay: 31, amount: 900 });
+        const unpaid = billsLedger({ bills: [jan] }, today);
+        assert.equal(dueRecurringBills(unpaid, new Set(['fac'])).length, 0);
+
+        const paid = billsLedger({ bills: [jan], payments: [{ id: 'p', billId: 'fac', amount: 900, date: today }] }, today);
+        const [feb] = dueRecurringBills(paid, new Set(['fac']));
+        assert.equal(feb.id, 'fac:2027-02');
+        assert.equal(feb.dueDate, '2027-02-28');
+        assert.equal(feb.seriesId, 'fac');
+        assert.equal(feb.amount, 900);
+        // Já existe (ou foi excluída): não gera de novo.
+        assert.equal(dueRecurringBills(paid, new Set(['fac', 'fac:2027-02'])).length, 0);
+        // Volta ao dia 31 quando o mês tem 31 dias.
+        assert.equal(nextBillOccurrence(nextBillOccurrence(jan)).dueDate, '2027-03-31');
+        // Conta única não gera nada.
+        const once = billsLedger({ bills: [bill('u')], payments: [{ id: 'p', billId: 'u', amount: 100, date: today }] }, today);
+        assert.equal(dueRecurringBills(once, new Set(['u'])).length, 0);
+    });
+
+    test('contas em aberto entram nos próximos compromissos', () => {
+        const l = billsLedger({ bills: [bill('net', { dueDate: '2026-10-15', amount: 120 }), bill('fora', { dueDate: '2026-12-01' })] }, today);
+        const items = upcomingCommitments({ accounts: [bank], txs: [], recurrences: [], today, days: 7, bills: l.bills });
+        assert.deepEqual(items.map((i) => [i.kind, i.description, i.amount]), [['bill', 'net', 120]]);
     });
 });
