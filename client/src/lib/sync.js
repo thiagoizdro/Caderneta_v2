@@ -66,6 +66,8 @@ async function applyResponse(sent, received) {
             if (local && local.updatedAt === change.updatedAt) await table.update(change.id, { _pending: 0 });
         }
         for (const change of received) {
+            // Coleção de uma versão mais nova do app: ignora em vez de travar a sincronização.
+            if (!COLLECTIONS.includes(change.collection)) continue;
             const table = db.table(change.collection);
             const local = await table.get(change.id);
             if (local && local._pending === 1 && local.updatedAt > change.updatedAt) continue;

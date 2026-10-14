@@ -7,6 +7,7 @@ export const NAV_ITEMS = [
     { path: '/calendario', label: 'Calendário', icon: 'calendar', group: 'main' },
     { path: '/diarias', label: 'Diárias e pagamentos', icon: 'coins', group: 'money', desc: 'Trabalhado, recebido e a receber', dailyOnly: true },
     { path: '/contas', label: 'Contas e cartões', icon: 'card', group: 'money', desc: 'Saldos, faturas e limites' },
+    { path: '/contas-a-pagar', label: 'Contas a pagar', icon: 'receipt', group: 'money', desc: 'Boletos, dívidas, reserva e quanto falta juntar' },
     { path: '/recorrentes', label: 'Recorrentes e parcelas', icon: 'layers', group: 'money', desc: 'Contas fixas e compras parceladas' },
     { path: '/orcamento', label: 'Orçamento', icon: 'piggy', group: 'plan', desc: 'Limites por categoria' },
     { path: '/metas', label: 'Metas', icon: 'target', group: 'plan', desc: 'Objetivos e depósitos' },

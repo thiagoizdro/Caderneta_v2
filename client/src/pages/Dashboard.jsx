@@ -143,7 +143,7 @@ export function Dashboard() {
             balance: balanceSeries(accounts, transactions, months, today),
             byCat,
             catTotal: byCat.reduce((a, c) => a + c.value, 0),
-            upcoming: upcomingCommitments({ accounts, txs: transactions, recurrences, today, days: 7 }),
+            upcoming: upcomingCommitments({ accounts, txs: transactions, recurrences, today, days: 7, bills: data.billLedger.bills }),
             top: topExpenses(transactions, ym, 5, today),
             insights: buildInsights({
                 accounts, categories, txs: transactions, recurrences, goals: data.goals,
@@ -151,7 +151,8 @@ export function Dashboard() {
             }),
             cashAccounts: accounts.filter((a) => !isCredit(a) && !a.archived).length,
         };
-    }, [accounts, transactions, recurrences, categories, categoryById, profile, today, ym, prevYm, data.goals, data.goalDeposits]);
+    }, [accounts, transactions, recurrences, categories, categoryById, profile, today, ym, prevYm, data.goals, data.goalDeposits, data.billLedger]);
+    const reserve = Math.max(data.billLedger.totals.reserve, 0);
 
     const recent = transactions.filter((t) => t.date <= today).slice(0, 6);
     const firstName = sync.user?.name?.split(' ')[0];
@@ -167,7 +168,7 @@ export function Dashboard() {
                     label="Saldo atual"
                     icon={Wallet}
                     value={view.current}
-                    foot={`em ${view.cashAccounts} ${view.cashAccounts === 1 ? 'conta' : 'contas'}${data.workLedger.totals.pending > 0 ? ` · fora ${money(data.workLedger.totals.pending)} a receber` : ''}`}
+                    foot={`em ${view.cashAccounts} ${view.cashAccounts === 1 ? 'conta' : 'contas'}${data.workLedger.totals.pending > 0 ? ` · fora ${money(data.workLedger.totals.pending)} a receber` : ''}${reserve > 0 ? ` · ${money(reserve)} reservado p/ contas` : ''}`}
                 />
                 <Kpi
                     label="Receitas do mês"
@@ -244,12 +245,12 @@ export function Dashboard() {
                         <div className="list">
                             {view.upcoming.slice(0, 6).map((i) => (
                                 <div className="list-row" key={i.key}>
-                                    <span className="cat-icon sm" style={{ '--c': i.kind === 'invoice' ? 'var(--series-7)' : i.type === 'income' ? 'var(--green)' : 'var(--gold)' }}>
-                                        <Icon name={i.kind === 'invoice' ? 'card' : i.kind === 'installment' ? 'layers' : 'repeat'} size={15} />
+                                    <span className="cat-icon sm" style={{ '--c': i.kind === 'invoice' ? 'var(--series-7)' : i.kind === 'bill' ? 'var(--red)' : i.type === 'income' ? 'var(--green)' : 'var(--gold)' }}>
+                                        <Icon name={i.kind === 'invoice' ? 'card' : i.kind === 'installment' ? 'layers' : i.kind === 'bill' ? 'receipt' : 'repeat'} size={15} />
                                     </span>
                                     <span className="list-main">
-                                        <span className="list-title">{i.description}</span>
-                                        <span className="list-sub">{relativeDay(i.date, today)}</span>
+                                        <span className="list-title">{i.kind === 'bill' ? <a href="#/contas-a-pagar">{i.description}</a> : i.description}</span>
+                                        <span className="list-sub">{relativeDay(i.date, today)}{i.kind === 'bill' && <span className="tag">Conta a pagar</span>}</span>
                                     </span>
                                     <span className={`list-amount ${i.type === 'income' ? 'pos' : ''}`}>{i.type === 'income' ? '+ ' : ''}{money(i.amount)}</span>
                                 </div>
