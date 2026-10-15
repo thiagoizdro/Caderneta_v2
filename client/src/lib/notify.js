@@ -51,19 +51,14 @@ function once(tag) {
     return true;
 }
 
-export function runDailyReminders({ accounts, txs, recurrences, categories, settings, bills }) {
+export function runDailyReminders({ accounts, txs, recurrences, categories, settings, bills = [], workdays = [] }) {
     if (!notificationsEnabled()) return;
     const today = todayISO();
 
-    const soon = upcomingCommitments({ accounts, txs, recurrences, today, days: 2, bills: bills?.bills }).filter((i) => i.type === 'expense');
+    const soon = upcomingCommitments({ accounts, txs, recurrences, today, days: 2, bills }).filter((i) => i.type === 'expense');
     if (soon.length && once('upcoming')) {
         const total = soon.reduce((a, i) => a + i.amount, 0);
         show('Contas chegando', `${soon.map((i) => i.description).slice(0, 3).join(', ')} — ${money(total)} nos próximos 2 dias.`, 'upcoming');
-    }
-
-    if (bills?.totals.overdueCount && once('bills-overdue')) {
-        const n = bills.totals.overdueCount;
-        show('Contas vencidas', `${n} ${n === 1 ? 'conta vencida' : 'contas vencidas'} somando ${money(bills.totals.overdue)}.`, 'bills-overdue');
     }
 
     for (const b of budgetStatus(categories, txs, today.slice(0, 7))) {
@@ -75,8 +70,8 @@ export function runDailyReminders({ accounts, txs, recurrences, categories, sett
     }
 
     if (settings?.mode === 'daily' && new Date().getHours() >= 18) {
-        const marked = txs.some((t) => t.source === 'workday' && t.date === today);
-        if (!marked && once('workday')) show('Caderneta', 'Trabalhou hoje? Marque o dia no calendário.', 'workday');
+        const marked = workdays.some((w) => w.date === today);
+        if (!marked && once('workday')) show('Caderneta', 'Trabalhou hoje? Marque o dia em Diárias.', 'workday');
     }
 }
 

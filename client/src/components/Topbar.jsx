@@ -1,4 +1,4 @@
-import { Moon, Search, Sun } from 'lucide-react';
+import { LayoutGrid, Moon, Search, Sun } from 'lucide-react';
 import { useState } from 'react';
 import { navigate, useUI } from '../state.jsx';
 import { SyncPill } from './ui.jsx';
@@ -58,8 +58,9 @@ export function Topbar({ eyebrow, title, children }) {
                 {eyebrow && <span className="eyebrow">{eyebrow}</span>}
                 <h1>{title}</h1>
             </div>
+            {/* Ações da página: linha própria no celular, ao lado do título no computador. */}
+            {children && <div className="topbar-page-actions">{children}</div>}
             <div className="topbar-actions">
-                {children}
                 <button className="search-trigger" onClick={ui.openSearch}>
                     <Search size={16} aria-hidden="true" /> Buscar
                     <kbd>{isMac ? '⌘' : 'Ctrl'} K</kbd>
@@ -67,6 +68,7 @@ export function Topbar({ eyebrow, title, children }) {
                 <button className="btn-icon search-icon-btn" onClick={ui.openSearch} aria-label="Buscar"><Search size={19} /></button>
                 <SyncPill onClick={() => navigate('/ajustes', { secao: 'conta' })} />
                 <ThemeToggle />
+                <a className="btn-icon more-btn" href="#/mais" aria-label="Mais opções" title="Mais"><LayoutGrid size={19} /></a>
             </div>
         </header>
     );

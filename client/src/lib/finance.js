@@ -6,8 +6,7 @@ import {
     addDays, addMonths, addMonthsToMonth, clampedDate, daysInMonth, diffDays,
     endOfMonth, monthOf, splitMonth, startOfMonth,
 } from './dates.js';
-import { CATEGORY_IDS, RECEIVABLE_ID } from './defaults.js';
-import { money as fmtMoney, round2 } from './format.js';
+import { round2 } from './format.js';
 
 // ------------------------------------------------------------
 // Básico
@@ -110,157 +109,100 @@ export function topExpenses(txs, ym, limit = 5, upTo = null) {
 }
 
 // ------------------------------------------------------------
-// Modo Diária e Salário Mensal
+// Diárias
 // ------------------------------------------------------------
+//
+// Dia trabalhado e dinheiro são coisas separadas:
+//   - a diária fica na coleção `workdays` (data, valor, observação) e nunca
+//     entra em saldo, receitas ou despesas;
+//   - o dinheiro só existe quando o usuário lança uma receita real. Nela, o
+//     campo opcional `workdayAmount` diz quanto corresponde às diárias; o resto
+//     é valor complementar. Ex.: 8 diárias de R$ 100 pagas com R$ 868 são UMA
+//     receita de R$ 868 = R$ 800 de diárias + R$ 68 complementares.
 
 export const workdayId = (date) => `workday:${date}`;
 
-export const isWorkday = (t) => t.source === 'workday';
-
-/** Diária marcada no calendário: fica a receber até a empresa pagar. */
-export function buildWorkday(date, rate) {
-    return {
-        id: workdayId(date), type: 'income', amount: round2(rate), description: 'Dia trabalhado', date,
-        source: 'workday', categoryId: CATEGORY_IDS.work, accountId: RECEIVABLE_ID,
-    };
+/** Dia trabalhado. Marcar, editar ou desmarcar não mexe em saldo nenhum. */
+export function buildWorkday(date, rate, notes = '') {
+    return { id: workdayId(date), date, amount: round2(rate), notes };
 }
-
-// ------------------------------------------------------------
-// Pagamentos de diárias
-// ------------------------------------------------------------
-//
-// A diária é a receita (o que foi trabalhado). O pagamento é só o dinheiro
-// chegando: uma transferência da "conta" a receber para uma conta real. Assim
-// ele entra no saldo sem contar de novo como receita.
-//
-// Diárias registradas antes deste controle entraram direto numa conta
-// (accountId real) e contam como já recebidas.
-
-export const isWorkPayment = (t) => t.source === 'workpayment';
-
-export const isReceivableWorkday = (t) => isWorkday(t) && t.accountId === RECEIVABLE_ID;
-
-export const WORKDAY_STATUS = { pending: 'Pendente', partial: 'Parcialmente paga', paid: 'Paga' };
 
 const cents = (v) => Math.round((Number(v) || 0) * 100);
 const byDate = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.createdAt || 0) - (b.createdAt || 0) || (a.id < b.id ? -1 : 1));
 
+/** Parte de uma receita que corresponde às diárias (0 quando não há vínculo). */
+export function workdayShare(t) {
+    if (t.type !== 'income') return 0;
+    return Math.min(Math.max(cents(t.workdayAmount), 0), Math.max(cents(t.amount), 0)) / 100;
+}
+
+export const WORKDAY_STATUS = { pending: 'A receber', partial: 'Parcialmente recebida', paid: 'Recebida' };
+
 /**
- * Situação das diárias e dos pagamentos.
+ * Situação das diárias.
  *
- * 1. Cada pagamento quita primeiro as diárias escolhidas nele (mais antigas antes).
- * 2. O que sobra, e os pagamentos sem diárias escolhidas, quitam as diárias
- *    pendentes mais antigas.
- * 3. Se ainda sobrar (ex.: uma diária paga foi excluída), vira crédito.
+ *   trabalhado = soma das diárias
+ *   recebido   = soma da parte "diárias" das receitas
+ *   pendente   = trabalhado − recebido (nunca negativo)
  *
- * Tudo é recalculado a partir dos registros: editar ou excluir uma diária ou
- * um pagamento nunca deixa o histórico inconsistente.
+ * O recebido cobre as diárias mais antigas primeiro, só para mostrar a
+ * situação de cada dia e de cada mês. Nada aqui gera lançamento.
  */
-export function workdayLedger(txs) {
-    const days = txs.filter(isWorkday).sort(byDate);
-    const payments = txs.filter(isWorkPayment).sort(byDate);
+export function workdaySummary(workdays, txs = []) {
+    const receipts = txs.filter((t) => workdayShare(t) > 0).sort(byDate);
+    const received = receipts.reduce((acc, t) => acc + cents(workdayShare(t)), 0);
+    const extra = receipts.reduce((acc, t) => acc + cents(t.amount) - cents(workdayShare(t)), 0);
 
-    const entries = new Map(days.map((t) => {
-        const amount = cents(t.amount);
-        const direct = !isReceivableWorkday(t);
-        return [t.id, { tx: t, amount, paid: direct ? amount : 0, direct, payments: [] }];
-    }));
-    const allocations = new Map(payments.map((p) => [p.id, []]));
-    const give = (entry, payment, value) => {
-        entry.paid += value;
-        entry.payments.push({ id: payment.id, amount: value / 100 });
-        allocations.get(payment.id).push({ id: entry.tx.id, date: entry.tx.date, amount: value / 100 });
-    };
+    let pool = received;
+    const days = [...workdays].sort(byDate).map((w) => {
+        const amount = cents(w.amount);
+        const paid = Math.min(pool, amount);
+        pool -= paid;
+        return {
+            id: w.id,
+            date: w.date,
+            workday: w,
+            amount: amount / 100,
+            paid: paid / 100,
+            remaining: (amount - paid) / 100,
+            status: paid >= amount ? 'paid' : paid > 0 ? 'partial' : 'pending',
+        };
+    });
 
-    const leftovers = [];
-    for (const p of payments) {
-        let rest = Math.max(cents(p.amount), 0);
-        const linked = (p.workdayIds || []).map((id) => entries.get(id)).filter(Boolean).sort((a, b) => byDate(a.tx, b.tx));
-        for (const e of linked) {
-            const take = Math.min(rest, e.amount - e.paid);
-            if (take > 0) { give(e, p, take); rest -= take; }
-        }
-        leftovers.push([p, rest]);
-    }
-    const queue = [...entries.values()];
-    let credit = 0;
-    for (const [p, amount] of leftovers) {
-        let rest = amount;
-        for (const e of queue) {
-            if (!rest) break;
-            const take = Math.min(rest, e.amount - e.paid);
-            if (take > 0) { give(e, p, take); rest -= take; }
-        }
-        credit += rest;
+    const months = new Map();
+    for (const d of days) {
+        const ym = monthOf(d.date);
+        const m = months.get(ym) || { ym, count: 0, worked: 0, paid: 0, remaining: 0 };
+        m.count += 1;
+        m.worked = round2(m.worked + d.amount);
+        m.paid = round2(m.paid + d.paid);
+        m.remaining = round2(m.remaining + d.remaining);
+        months.set(ym, m);
     }
 
-    const list = [...entries.values()].map((e) => ({
-        id: e.tx.id,
-        tx: e.tx,
-        date: e.tx.date,
-        amount: e.amount / 100,
-        paid: e.paid / 100,
-        remaining: (e.amount - e.paid) / 100,
-        direct: e.direct,
-        payments: e.payments,
-        status: e.paid >= e.amount ? 'paid' : e.paid > 0 ? 'partial' : 'pending',
-    }));
-
-    const worked = days.reduce((acc, t) => acc + cents(t.amount), 0);
-    const direct = list.filter((e) => e.direct).reduce((acc, e) => acc + cents(e.amount), 0);
-    const paidOut = payments.reduce((acc, p) => acc + cents(p.amount), 0);
-    const received = direct + paidOut;
-    const pending = list.reduce((acc, e) => acc + cents(e.remaining), 0);
-
+    const worked = days.reduce((acc, d) => acc + cents(d.amount), 0);
     return {
-        days: list,
-        byId: new Map(list.map((e) => [e.id, e])),
-        payments: payments.map((p) => ({ tx: p, allocations: allocations.get(p.id) })),
+        days,
+        byId: new Map(days.map((d) => [d.id, d])),
+        months,
+        receipts,
         totals: {
+            count: days.length,
             worked: worked / 100,
             received: received / 100,
-            paidOut: paidOut / 100,
-            direct: direct / 100,
-            // Saldo a receber = total de diárias − total recebido (nunca negativo).
-            pending: pending / 100,
-            credit: credit / 100,
-            count: list.length,
-            pendingCount: list.filter((e) => e.status !== 'paid').length,
+            pending: Math.max(worked - received, 0) / 100,
+            // Recebido além do trabalhado (ex.: diária excluída depois de paga).
+            credit: Math.max(received - worked, 0) / 100,
+            // Valores complementares que vieram junto com os pagamentos.
+            extra: extra / 100,
+            pendingCount: days.filter((d) => d.status !== 'paid').length,
         },
     };
 }
 
-/**
- * Regras do registro de pagamento. `ledger` deve ser calculado SEM o pagamento
- * que está sendo editado. Devolve a mensagem de erro, ou null se estiver tudo certo.
- */
-export function validateWorkPayment(ledger, { amount, workdayIds = [] }) {
-    const value = cents(amount);
-    if (!(value > 0)) return 'Informe um valor maior que zero.';
-    const pending = cents(ledger.totals.pending);
-    if (pending <= 0) return 'Não há saldo a receber: todas as diárias já estão pagas.';
-    if (value > pending) {
-        return `O valor passa do saldo a receber (${fmtMoney(pending / 100)}). Pagamentos adiantados não são aceitos.`;
-    }
-    if (workdayIds.length) {
-        const selected = workdayIds.reduce((acc, id) => acc + cents(ledger.byId.get(id)?.remaining), 0);
-        if (value > selected) {
-            return `O valor passa do que falta nas diárias escolhidas (${fmtMoney(selected / 100)}). Escolha mais diárias ou deixe sem seleção.`;
-        }
-    }
-    return null;
-}
-
-/** O "recibo" do modo Diária: bruto dos dias trabalhados, gastos pessoais e repasses a terceiros. */
-export function dailyReceipt(txs, ym) {
-    const month = txs.filter((t) => inMonth(t, ym));
-    const workdays = month.filter(isWorkday);
-    const gross = sum(workdays, (t) => t.amount);
-    const otherIncome = sum(month.filter((t) => t.type === 'income' && !isWorkday(t)), (t) => t.amount);
-    const personal = sum(month.filter((t) => t.type === 'expense' && !t.person), (t) => t.amount);
-    const thirdParty = sum(month.filter((t) => t.type === 'expense' && t.person), (t) => t.amount);
-    const net = round2(gross + otherIncome - personal);
-    return { days: workdays.length, gross, otherIncome, personal, thirdParty, net, real: round2(net - thirdParty) };
+/** Resumo de um mês de diárias (zerado quando não há dias). */
+export function workdayMonth(summary, ym) {
+    return summary.months.get(ym) || { ym, count: 0, worked: 0, paid: 0, remaining: 0 };
 }
 
 /** O resumo do modo Salário Mensal. */
@@ -547,9 +489,10 @@ const isVariable = (t) => t.type === 'expense' && !['recurrence', 'installment']
  *   + recorrências que ainda vão acontecer
  *   − faturas de cartão que vencem até o fim do mês
  *   − gasto variável projetado (média diária do mês × dias restantes)
- *   + diárias projetadas (no modo Diária, pelo ritmo de dias trabalhados)
+ *
+ * Diárias ainda não recebidas não entram: só dinheiro lançado conta.
  */
-export function forecastMonthEnd({ accounts, txs, recurrences, settings = {}, today }) {
+export function forecastMonthEnd({ accounts, txs, recurrences, today }) {
     const ym = monthOf(today);
     const end = endOfMonth(ym);
     const daysLeft = diffDays(today, end);
@@ -586,19 +529,13 @@ export function forecastMonthEnd({ accounts, txs, recurrences, settings = {}, to
     }
     const variable = round2(dailyVariable * daysLeft);
 
-    let work = 0;
-    if (settings.mode === 'daily' && Number(settings.dailyRate) > 0) {
-        const worked = txs.filter((t) => isWorkday(t) && inMonth(t, ym) && t.date <= today).length;
-        work = round2((worked / dayOfMonth) * daysLeft * Number(settings.dailyRate));
-    }
-
-    const endBalance = round2(current + scheduled + recurring - cardDue - variable + work);
-    return { current, scheduled, recurring, cardDue, variable, work, end: endBalance, endDate: end, daysLeft, pendingCount: pending.length };
+    const endBalance = round2(current + scheduled + recurring - cardDue - variable);
+    return { current, scheduled, recurring, cardDue, variable, end: endBalance, endDate: end, daysLeft, pendingCount: pending.length };
 }
 
 /**
  * Compromissos dos próximos dias: recorrências, lançamentos agendados, faturas
- * e contas a pagar em aberto (`bills` = entradas de billsLedger).
+ * e itens do planejamento de contas (`bills`, só como aviso).
  */
 export function upcomingCommitments({ accounts, txs, recurrences, today, days = 7, bills = [] }) {
     const to = addDays(today, days);
@@ -622,9 +559,9 @@ export function upcomingCommitments({ accounts, txs, recurrences, today, days = 
             }
         }
     }
-    for (const e of bills) {
-        if (e.status !== 'paid' && e.bill.dueDate >= today && e.bill.dueDate <= to) {
-            items.push({ key: `bill:${e.id}`, date: e.bill.dueDate, description: e.bill.description, amount: e.remaining, type: 'expense', kind: 'bill', billId: e.id });
+    for (const b of bills) {
+        if (!b.archived && b.dueDate >= today && b.dueDate <= to) {
+            items.push({ key: `bill:${b.id}`, date: b.dueDate, description: b.description, amount: Number(b.amount), type: 'expense', kind: 'bill', billId: b.id });
         }
     }
     return items.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
@@ -661,159 +598,36 @@ export function goalProgress(goal, deposits, today) {
 }
 
 // ------------------------------------------------------------
-// Contas a pagar
+// Planejamento de contas
 // ------------------------------------------------------------
 //
-// A conta (bill) é só o compromisso: cadastrar, editar ou excluir uma conta
-// não mexe em saldo nenhum.
-//
-// O pagamento é o que tira dinheiro das contas. Cada pagamento tem no máximo
-// um lançamento ligado (id `billpay:<pagamento>`), conforme `mode`:
-//   expense  — despesa na conta escolhida (o caso comum: boleto, mensalidade)
-//   transfer — transferência para um cartão: pagar a fatura cujas compras já
-//              estão lançadas não pode virar uma segunda despesa
-//   none     — sem lançamento: a despesa já existe em Lançamentos
-//              (ex.: gerada por uma recorrência)
-//
-// A reserva é dinheiro separado *dentro* das contas: depósitos e retiradas
-// não criam lançamentos e não mudam o saldo. Quando um pagamento usa a
-// reserva (`fromReserve`), ela diminui junto com o saldo. Assim o mesmo
-// dinheiro nunca é contado nem descontado duas vezes.
+// Cada item é só descrição, valor e vencimento (coleção `bills`). O
+// planejamento nunca cria lançamento nem muda saldo: quando a conta é paga, o
+// usuário lança a despesa em Movimentações e exclui o item, se quiser.
+// Itens com `archived` (contas já quitadas antes da 3.0) ficam fora.
 
-export const BILL_STATUS = { pending: 'Pendente', partial: 'Parcialmente paga', paid: 'Paga', overdue: 'Vencida' };
+const planOrder = (a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : String(a.description).localeCompare(String(b.description), 'pt-BR'));
 
-/** Até quantos dias antes do vencimento a conta aparece como "vence em breve". */
-export const BILL_SOON_DAYS = 5;
-
-export const billPaymentTxId = (paymentId) => `billpay:${paymentId}`;
-
-export const isBillPayment = (t) => t.source === 'billpayment';
-
-const billOrder = (a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : String(a.description).localeCompare(String(b.description), 'pt-BR'));
-
-/**
- * Situação de todas as contas, da reserva e dos totais.
- * Status: paga (nada pendente), vencida (passou do vencimento com saldo),
- * parcialmente paga (algum pagamento) ou pendente.
- */
-export function billsLedger({ bills = [], payments = [], reserveMoves = [] }, today) {
-    const byBill = new Map(bills.map((b) => [b.id, []]));
-    for (const p of payments) byBill.get(p.billId)?.push(p);
-
-    const list = [...bills].sort(billOrder).map((bill) => {
-        const own = byBill.get(bill.id).sort(byDate);
-        const amount = cents(bill.amount);
-        const paid = own.reduce((acc, p) => acc + cents(p.amount), 0);
-        const remaining = Math.max(amount - paid, 0);
-        const daysLeft = diffDays(today, bill.dueDate);
-        const status = remaining <= 0 ? 'paid' : daysLeft < 0 ? 'overdue' : paid > 0 ? 'partial' : 'pending';
-        return {
-            id: bill.id,
-            bill,
-            amount: amount / 100,
-            paid: paid / 100,
-            remaining: remaining / 100,
-            daysLeft,
-            status,
-            soon: status !== 'paid' && status !== 'overdue' && daysLeft <= BILL_SOON_DAYS,
-            payments: own,
-        };
-    });
-
-    const deposited = reserveMoves.reduce((acc, m) => acc + cents(m.amount), 0);
-    const used = payments.reduce((acc, p) => acc + cents(p.fromReserve), 0);
-    const reserve = deposited - used;
-    const open = list.filter((e) => e.status !== 'paid');
-    const pending = open.reduce((acc, e) => acc + cents(e.remaining), 0);
-    const overdue = open.filter((e) => e.status === 'overdue');
-
+/** Itens do planejamento agrupados por mês de vencimento, com os totais. */
+export function planSummary(bills = []) {
+    const items = bills.filter((b) => !b.archived).sort(planOrder);
+    const months = new Map();
+    for (const b of items) {
+        const ym = monthOf(b.dueDate);
+        const m = months.get(ym) || { ym, items: [], total: 0 };
+        m.items.push(b);
+        m.total = round2(m.total + (Number(b.amount) || 0));
+        months.set(ym, m);
+    }
     return {
-        bills: list,
-        byId: new Map(list.map((e) => [e.id, e])),
-        totals: {
-            // Total a pagar: o que falta em todas as contas não pagas.
-            pending: pending / 100,
-            reserve: reserve / 100,
-            // Falta juntar = total a pagar − reserva (nunca negativo).
-            missing: Math.max(pending - reserve, 0) / 100,
-            surplus: Math.max(reserve - pending, 0) / 100,
-            coverage: pending > 0 ? Math.min(Math.max(reserve, 0) / pending, 1) : 1,
-            openCount: open.length,
-            overdue: overdue.reduce((acc, e) => acc + cents(e.remaining), 0) / 100,
-            overdueCount: overdue.length,
-            soonCount: open.filter((e) => e.soon).length,
-        },
+        items,
+        months: [...months.values()],
+        total: sum(items, (b) => b.amount),
+        count: items.length,
     };
 }
 
-/** Soma dos pagamentos de contas feitos no mês. */
-export function billsPaidInMonth(payments, ym) {
-    return payments.filter((p) => inMonth(p, ym)).reduce((acc, p) => acc + cents(p.amount), 0) / 100;
-}
-
-/**
- * Regras do pagamento de uma conta. `entry` e `reserve` devem ser calculados
- * SEM o pagamento que está sendo editado. Devolve a mensagem de erro ou null.
- */
-export function validateBillPayment(entry, reserve, { amount, fromReserve = 0 }) {
-    const value = cents(amount);
-    const reserved = cents(fromReserve);
-    if (!(value > 0)) return 'Informe um valor maior que zero.';
-    const remaining = cents(entry?.remaining);
-    if (remaining <= 0) return 'Esta conta já está paga.';
-    if (value > remaining) return `O valor passa do que falta pagar nesta conta (${fmtMoney(remaining / 100)}).`;
-    if (reserved < 0) return 'O valor usado da reserva não pode ser negativo.';
-    if (reserved > value) return 'O valor usado da reserva não pode passar do valor pago.';
-    if (reserved > Math.max(cents(reserve), 0)) return `A reserva tem só ${fmtMoney(Math.max(cents(reserve), 0) / 100)}.`;
-    return null;
-}
-
-/** Lançamento ligado a um pagamento de conta (null quando `mode` é "none"). */
-export function buildBillPaymentTx(payment, bill) {
-    if (!payment.mode || payment.mode === 'none') return null;
-    const base = {
-        id: billPaymentTxId(payment.id),
-        source: 'billpayment',
-        billId: bill.id,
-        paymentId: payment.id,
-        amount: round2(payment.amount),
-        date: payment.date,
-        description: bill.description,
-        notes: payment.notes || '',
-        person: '',
-    };
-    return payment.mode === 'transfer'
-        ? { ...base, type: 'transfer', accountId: payment.accountId, toAccountId: payment.toAccountId, categoryId: null }
-        : { ...base, type: 'expense', accountId: payment.accountId, toAccountId: null, categoryId: payment.categoryId || CATEGORY_IDS.other };
-}
-
-/** Próxima competência de uma conta mensal (id determinístico: não duplica entre aparelhos). */
-export function nextBillOccurrence(bill) {
-    const seriesId = bill.seriesId || bill.id;
-    const dueDay = Number(bill.dueDay) || Number(bill.dueDate.slice(8, 10));
-    const ym = addMonthsToMonth(monthOf(bill.dueDate), 1);
-    const { year, month } = splitMonth(ym);
-    // eslint-disable-next-line no-unused-vars
-    const { id, createdAt, updatedAt, deleted, _pending, ...fields } = bill;
-    return { ...fields, id: `${seriesId}:${ym}`, seriesId, dueDay, dueDate: clampedDate(year, month, dueDay) };
-}
-
-/**
- * Contas mensais a gerar: quando a competência mais recente de uma série está
- * paga, nasce a do mês seguinte. `knownIds` inclui as excluídas: excluir a
- * próxima competência encerra a série em vez de recriá-la.
- */
-export function dueRecurringBills(ledger, knownIds) {
-    const latest = new Map();
-    for (const e of ledger.bills) {
-        const series = e.bill.seriesId || e.bill.id;
-        if (!latest.has(series) || e.bill.dueDate > latest.get(series).bill.dueDate) latest.set(series, e);
-    }
-    const out = [];
-    for (const e of latest.values()) {
-        if (e.bill.recurrence !== 'monthly' || e.status !== 'paid') continue;
-        const next = nextBillOccurrence(e.bill);
-        if (!knownIds.has(next.id)) out.push(next);
-    }
-    return out;
+/** "Disponível após planejamento": saldo atual − total planejado. Só informativo. */
+export function availableAfterPlan(balance, planTotal) {
+    return round2((Number(balance) || 0) - (Number(planTotal) || 0));
 }

@@ -56,6 +56,18 @@ export async function saveMany(collection, records, { updatedAt } = {}) {
     return out;
 }
 
+/**
+ * Grava registros já prontos, cada um com o seu updatedAt e `deleted`
+ * (usado pela migração 3.0, que precisa de carimbos determinísticos).
+ */
+export async function putRows(collection, rows) {
+    if (!rows.length) return;
+    const table = db.table(collection);
+    const now = Date.now();
+    await table.bulkPut(rows.map(({ _pending, ...r }) => ({ createdAt: now, ...r, deleted: r.deleted ? 1 : 0, _pending: 1 })));
+    emit();
+}
+
 export async function update(collection, id, patch) {
     const current = await db.table(collection).get(id);
     if (!current) return null;

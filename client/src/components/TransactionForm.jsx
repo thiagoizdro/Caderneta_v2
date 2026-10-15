@@ -1,16 +1,15 @@
-import { ArrowDownRight, ArrowLeftRight, ArrowUpRight, HandCoins, Info, Sparkles } from 'lucide-react';
+import { ArrowDownRight, ArrowLeftRight, ArrowUpRight, Info, Sparkles } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { suggestCategory } from '../lib/categorize.js';
 import { saveRecurrence } from '../lib/bootstrap.js';
-import { FREQUENCIES, buildInstallments, defaultAccountId, isCredit, splitInstallments } from '../lib/finance.js';
-import { CATEGORY_IDS, PAYMENT_METHODS, RECEIVABLE_ID } from '../lib/defaults.js';
+import { FREQUENCIES, buildInstallments, defaultAccountId, isCredit, splitInstallments, workdayShare } from '../lib/finance.js';
+import { CATEGORY_IDS } from '../lib/defaults.js';
 import { money, parseAmount, round2 } from '../lib/format.js';
 import { budgetAlertFor } from '../lib/notify.js';
 import { newId, removeMany, save, saveMany } from '../lib/store.js';
 import { db } from '../lib/db.js';
 import { navigate, useData, useUI } from '../state.jsx';
 import { CategoryIcon, Modal } from './ui.jsx';
-import { WorkdayStatusTag, confirmPaidWorkday } from './PaymentForm.jsx';
 import { seriesColor } from './Icon.jsx';
 
 const TYPES = [
@@ -40,6 +39,9 @@ export function TransactionForm({ initial, onClose }) {
     const [mode, setMode] = useState('once'); // once | installments | repeat
     const [installments, setInstallments] = useState(2);
     const [frequency, setFrequency] = useState('monthly');
+    // Recebimento de diárias: quanto desta receita corresponde às diárias (o resto é complementar).
+    const [linkWork, setLinkWork] = useState(workdayShare(initial || {}) > 0);
+    const [workText, setWorkText] = useState(workdayShare(initial || {}) > 0 ? String(workdayShare(initial)).replace('.', ',') : '');
     const [error, setError] = useState('');
 
     const amount = parseAmount(amountText);
@@ -53,21 +55,15 @@ export function TransactionForm({ initial, onClose }) {
     const recurrence = initial?.recurrenceId ? recurrences.find((r) => r.id === initial.recurrenceId) : null;
     const accountOptions = activeAccounts.filter((a) => type !== 'income' || !isCredit(a));
     const toAccount = data.accountById.get(toAccountId);
-    const isWorkdayTx = initial?.source === 'workday';
-    const workEntry = isWorkdayTx ? data.workLedger.byId.get(initial.id) : null;
-    const title = isWorkdayTx ? 'Editar diária' : editing ? 'Editar lançamento' : 'Novo lançamento';
+    const title = editing ? 'Editar movimentação' : 'Nova movimentação';
 
-    async function moveToReceivable() {
-        const ok = await ui.confirm({
-            title: 'Mover para "a receber"?',
-            message: `${money(initial.amount)} saem do saldo de ${data.accountById.get(initial.accountId)?.name || 'sua conta'} e esta diária passa a aguardar o pagamento da empresa.`,
-            confirmLabel: 'Mover',
-        });
-        if (!ok) return;
-        await save('transactions', { ...initial, accountId: RECEIVABLE_ID });
-        ui.toast('Diária movida para a receber.', 'success');
-        onClose();
-    }
+    // O campo de diárias só aparece para quem usa diárias (ou se a receita já tem vínculo).
+    const showWork = type === 'income' && (data.profile?.mode === 'daily' || data.workdays.length > 0 || workdayShare(initial || {}) > 0);
+    const workAmount = parseAmount(workText) || 0;
+    const { worked, received } = data.work.totals;
+    // Pendente sem contar esta receita (ao editar, ela já está no "recebido").
+    const pendingBefore = round2(Math.max(worked - (received - (editing ? workdayShare(initial) : 0)), 0));
+    const extraAmount = round2(Math.max(amount - workAmount, 0));
 
     function changeType(next) {
         setType(next);
@@ -86,10 +82,13 @@ export function TransactionForm({ initial, onClose }) {
         e?.preventDefault();
         if (!(amount > 0)) return setError('Informe um valor maior que zero.');
         if (!description.trim() && type !== 'transfer') return setError('Dê uma descrição ao lançamento.');
-        if (!accountId && !isWorkdayTx) return setError('Escolha uma conta.');
+        if (!accountId) return setError('Escolha uma conta.');
         if (type === 'transfer' && (!toAccountId || toAccountId === accountId)) return setError('Escolha uma conta de destino diferente da origem.');
         if (isThird && !person.trim()) return setError('Informe o nome do terceiro.');
         if (mode === 'installments' && !(installments >= 2 && installments <= 72)) return setError('Parcelas: de 2 a 72.');
+        const linked = showWork && linkWork;
+        if (linked && !(workAmount > 0)) return setError('Informe quanto desta receita é das diárias, ou desligue a opção.');
+        if (linked && round2(workAmount) > round2(amount)) return setError('A parte das diárias não pode passar do valor recebido.');
 
         const base = {
             type,
@@ -101,17 +100,14 @@ export function TransactionForm({ initial, onClose }) {
             toAccountId: type === 'transfer' ? toAccountId : null,
             person: type === 'expense' && isThird ? person.trim() : '',
             notes: notes.trim(),
+            // Só informativo para as diárias: a receita entra no saldo uma única vez, pelo valor total.
+            workdayAmount: linked ? round2(workAmount) : null,
         };
-
-        // A diária continua onde estava (a receber ou, se antiga, na conta).
-        if (isWorkdayTx) base.accountId = initial.accountId;
-        const workdayChanged = isWorkdayTx && (round2(amount) !== round2(initial.amount) || date !== initial.date);
-        if (workdayChanged && !(await confirmPaidWorkday(ui, workEntry, 'alterar'))) return;
 
         let created = [];
         if (editing) {
             created = [await save('transactions', { ...initial, ...base })];
-            ui.toast('Lançamento atualizado.', 'success');
+            ui.toast('Movimentação atualizada.', 'success');
         } else if (mode === 'installments') {
             created = await saveMany('transactions', buildInstallments({
                 ...base, groupId: newId('parc-'), totalAmount: base.amount, count: installments, firstDate: date,
@@ -130,7 +126,9 @@ export function TransactionForm({ initial, onClose }) {
             created = [{ ...base }];
         } else {
             created = [await save('transactions', { ...base, source: 'manual' })];
-            ui.toast('Lançamento salvo.', 'success');
+            ui.toast(linked
+                ? `Receita de ${money(base.amount)} salva (${money(base.workdayAmount)} de diárias${extraAmount > 0 ? ` + ${money(extraAmount)} complementares` : ''}).`
+                : base.type === 'income' ? 'Receita salva.' : base.type === 'expense' ? 'Despesa salva.' : 'Transferência salva.', 'success');
         }
 
         if (type === 'expense' && base.categoryId) {
@@ -160,15 +158,13 @@ export function TransactionForm({ initial, onClose }) {
             });
             if (!choice) return;
             if (choice === 'rest') ids = siblings.filter((t) => t.installment.index >= inst.index).map((t) => t.id);
-        } else if (workEntry?.paid > 0) {
-            if (!(await confirmPaidWorkday(ui, workEntry))) return;
-        } else if (!(await ui.confirm({ title: 'Excluir lançamento?', message: `"${initial.description}" — ${money(initial.amount)}`, confirmLabel: 'Excluir', danger: true }))) {
+        } else if (!(await ui.confirm({ title: 'Excluir movimentação?', message: `"${initial.description}" — ${money(initial.amount)}`, confirmLabel: 'Excluir', danger: true }))) {
             return;
         }
         const snapshot = await db.transactions.bulkGet(ids);
         await removeMany('transactions', ids);
         onClose();
-        ui.toast(ids.length > 1 ? `${ids.length} parcelas excluídas.` : 'Lançamento excluído.', 'info', {
+        ui.toast(ids.length > 1 ? `${ids.length} parcelas excluídas.` : 'Movimentação excluída.', 'info', {
             label: 'Desfazer',
             run: () => saveMany('transactions', snapshot.filter(Boolean)),
         });
@@ -181,12 +177,12 @@ export function TransactionForm({ initial, onClose }) {
             footer={(
                 <>
                     {editing && <button type="button" className="btn btn-danger" onClick={onDelete}>Excluir</button>}
-                    <button type="submit" form="tx-form" className="btn btn-primary">{editing ? 'Salvar alterações' : 'Salvar lançamento'}</button>
+                    <button type="submit" form="tx-form" className="btn btn-primary">{editing ? 'Salvar alterações' : 'Salvar'}</button>
                 </>
             )}
         >
             <form id="tx-form" onSubmit={submit} noValidate>
-                {!initial?.installment && initial?.source !== 'workday' && (
+                {!initial?.installment && (
                     <div className="segmented" role="tablist" aria-label="Tipo de lançamento">
                         {TYPES.map((t) => (
                             <button
@@ -212,26 +208,6 @@ export function TransactionForm({ initial, onClose }) {
                         <span>Gerado pela recorrência "{recurrence.description}". Alterar aqui muda só esta ocorrência. <a href={`#/recorrentes?id=${recurrence.id}`} onClick={onClose}>Editar recorrência</a></span>
                     </div>
                 )}
-                {isWorkdayTx && (
-                    <div className="callout info mt">
-                        <Info size={16} />
-                        <span>
-                            Dia trabalhado — para desmarcar, use o calendário.
-                            {workEntry && (
-                                <span className="row wrap" style={{ marginTop: 6, gap: 6 }}>
-                                    <WorkdayStatusTag status={workEntry.status} />
-                                    {workEntry.direct
-                                        ? <span>Lançada direto em {data.accountById.get(initial.accountId)?.name || 'uma conta'} (antes do controle de pagamentos).</span>
-                                        : <span>Recebido {money(workEntry.paid)} de {money(workEntry.amount)}.</span>}
-                                </span>
-                            )}
-                            {workEntry?.direct && (
-                                <button type="button" className="btn btn-secondary btn-sm" style={{ marginTop: 8 }} onClick={moveToReceivable}>Ainda não recebi — mover para a receber</button>
-                            )}
-                        </span>
-                    </div>
-                )}
-
                 <div className="field mt">
                     <label className="label" htmlFor="tx-amount">Valor{mode === 'installments' ? ' total' : ''}</label>
                     <div className="input-affix lg">
@@ -293,14 +269,13 @@ export function TransactionForm({ initial, onClose }) {
                         <label className="label" htmlFor="tx-date">{mode === 'installments' ? '1ª parcela' : 'Data'}</label>
                         <input id="tx-date" type="date" className="input" value={date} onChange={(e) => setDate(e.target.value || today)} required />
                     </div>
-                    {!isWorkdayTx && (
-                        <div className="field">
-                            <label className="label" htmlFor="tx-account">{type === 'transfer' ? 'De' : type === 'income' ? 'Entrou em' : 'Pago com'}</label>
-                            <select id="tx-account" className="select" value={accountId} onChange={(e) => setAccountId(e.target.value)}>
-                                {accountOptions.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-                            </select>
-                        </div>
-                    )}
+                    <div className="field">
+                        <label className="label" htmlFor="tx-account">{type === 'transfer' ? 'De' : type === 'income' ? 'Entrou em' : 'Pago com'}</label>
+                        <select id="tx-account" className="select" value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+                            {!accountOptions.some((a) => a.id === accountId) && <option value="">Escolha…</option>}
+                            {accountOptions.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                        </select>
+                    </div>
                 </div>
 
                 {type === 'transfer' && (
@@ -312,6 +287,43 @@ export function TransactionForm({ initial, onClose }) {
                                 <option key={a.id} value={a.id}>{a.name}{isCredit(a) ? ' (pagar fatura)' : ''}</option>
                             ))}
                         </select>
+                    </div>
+                )}
+
+                {showWork && (
+                    <div className="work-link mt">
+                        <label className="switch">
+                            <span className="switch-text">
+                                <strong>Recebimento de diárias</strong>
+                                <span>Diz quanto desta receita paga as diárias. Não cria outra entrada no saldo.</span>
+                            </span>
+                            <input
+                                type="checkbox"
+                                checked={linkWork}
+                                onChange={(e) => {
+                                    setLinkWork(e.target.checked);
+                                    if (e.target.checked && !workText) setWorkText(String(round2(Math.min(pendingBefore, amount || pendingBefore))).replace('.', ','));
+                                }}
+                            />
+                        </label>
+                        {linkWork && (
+                            <div className="field">
+                                <label className="label" htmlFor="tx-work">Parte referente às diárias</label>
+                                <div className="input-affix">
+                                    <input id="tx-work" className="input" inputMode="decimal" placeholder="0,00" value={workText} onChange={(e) => { setWorkText(e.target.value.replace(/[^\d.,]/g, '')); setError(''); }} autoComplete="off" />
+                                    <span className="affix">R$</span>
+                                </div>
+                                <div className="work-split" aria-live="polite">
+                                    <span>A receber das diárias <b className="num">{money(pendingBefore)}</b></span>
+                                    {amount > 0 && <span>Complementar <b className="num">{money(extraAmount)}</b></span>}
+                                </div>
+                                {pendingBefore > 0 && round2(workAmount) !== pendingBefore && (
+                                    <button type="button" className="btn btn-ghost btn-sm" style={{ justifySelf: 'start' }} onClick={() => setWorkText(String(pendingBefore).replace('.', ','))}>
+                                        Usar tudo o que falta ({money(pendingBefore)})
+                                    </button>
+                                )}
+                            </div>
+                        )}
                     </div>
                 )}
 
@@ -384,33 +396,14 @@ export function TransactionForm({ initial, onClose }) {
 }
 
 export function TransactionRow({ tx, onClick, showDate = false }) {
-    const { categoryById, accountById, today, workLedger } = useData();
+    const { categoryById, accountById, today } = useData();
     const category = categoryById.get(tx.categoryId);
     const account = accountById.get(tx.accountId);
     const to = accountById.get(tx.toAccountId);
     const future = tx.date > today;
     const sign = tx.type === 'income' ? '+ ' : tx.type === 'expense' ? '− ' : '';
     const cls = tx.type === 'income' ? 'pos' : tx.type === 'transfer' ? 'soft' : '';
-    const workEntry = tx.source === 'workday' ? workLedger.byId.get(tx.id) : null;
-
-    // Pagamento de diárias: dinheiro chegando da empresa (não é receita nova).
-    if (tx.source === 'workpayment') {
-        return (
-            <button className="list-row" onClick={() => onClick?.(tx)}>
-                <span className="cat-icon" style={{ '--c': 'var(--green)' }} aria-hidden="true"><HandCoins size={18} /></span>
-                <span className="list-main">
-                    <span className="list-title">{tx.description}</span>
-                    <span className="list-sub">
-                        {showDate && <span>{tx.date.split('-').reverse().slice(0, 2).join('/')}</span>}
-                        <span>{PAYMENT_METHODS[tx.method] || 'Pagamento'}{to ? ` → ${to.name}` : ''}</span>
-                        <span className="tag green">Diárias</span>
-                        {future && <span className="tag">Agendado</span>}
-                    </span>
-                </span>
-                <span className="list-amount soft">+ {money(tx.amount)}</span>
-            </button>
-        );
-    }
+    const share = workdayShare(tx);
 
     return (
         <button className="list-row" onClick={() => onClick?.(tx)}>
@@ -424,11 +417,12 @@ export function TransactionRow({ tx, onClick, showDate = false }) {
                     {tx.type === 'transfer'
                         ? <span>{account?.name} → {to?.name}</span>
                         : <span>{category?.name || 'Sem categoria'}{account ? ` · ${account.name}` : ''}</span>}
-                    {workEntry && <WorkdayStatusTag status={workEntry.status} />}
+                    {share > 0 && <span className="tag green">Diárias {money(share)}{tx.amount - share > 0.004 ? ` + ${money(tx.amount - share)}` : ''}</span>}
+                    {tx.source === 'legacy-workday' && <span className="tag">Diária antiga</span>}
                     {tx.person && <span className="tag gold">{tx.person}</span>}
                     {tx.installment && <span className="tag">{tx.installment.index}/{tx.installment.total}</span>}
                     {tx.source === 'recurrence' && <span className="tag blue">Recorrente</span>}
-                    {tx.source === 'billpayment' && <span className="tag gold">Conta a pagar</span>}
+                    {tx.source === 'billpayment' && <span className="tag gold">Conta paga</span>}
                     {future && <span className="tag">Agendado</span>}
                 </span>
             </span>

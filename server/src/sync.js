@@ -14,6 +14,7 @@ export const COLLECTIONS = [
     'bills',
     'billPayments',
     'reserveMoves',
+    'workdays',
 ];
 
 export const MAX_PUSH = 1000;

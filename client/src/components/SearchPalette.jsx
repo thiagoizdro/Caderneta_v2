@@ -54,7 +54,7 @@ export function SearchPalette({ onClose, onOpenTx, onNewTx }) {
             out.push({ key: g.id, section: 'Metas', title: g.name, icon: g.icon || 'target', run: () => navigate('/metas') });
         }
         for (const c of data.categories.filter((cat) => normalize(cat.name).includes(q)).slice(0, 4)) {
-            out.push({ key: `cat-${c.id}`, section: 'Categorias', title: `Lançamentos em ${c.name}`, category: c, run: () => navigate('/lancamentos', { categoria: c.id }) });
+            out.push({ key: `cat-${c.id}`, section: 'Categorias', title: `Movimentações em ${c.name}`, category: c, run: () => navigate('/movimentacoes', { categoria: c.id }) });
         }
         return out;
     }, [query, data, onNewTx, onOpenTx]);

@@ -3,7 +3,7 @@ import Dexie from 'dexie';
 // Coleções sincronizadas com o servidor (mesma lista de server/src/sync.js).
 export const COLLECTIONS = [
     'settings', 'accounts', 'categories', 'transactions', 'recurrences', 'goals', 'goalDeposits',
-    'bills', 'billPayments', 'reserveMoves',
+    'bills', 'billPayments', 'reserveMoves', 'workdays',
 ];
 
 // Campos de controle guardados junto de cada registro, mas que não são "dados":
@@ -30,6 +30,11 @@ db.version(2).stores({
     bills: 'id, _pending, seriesId',
     billPayments: 'id, billId, _pending',
     reserveMoves: 'id, _pending',
+});
+
+// 3.0: dias trabalhados separados das movimentações financeiras.
+db.version(3).stores({
+    workdays: 'id, date, _pending',
 });
 
 export async function getMeta(key, fallback = null) {

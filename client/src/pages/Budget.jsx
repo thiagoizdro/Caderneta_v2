@@ -160,7 +160,7 @@ export function Budget() {
                     <div className="budget-row" key={c.id}>
                         <div className="budget-top">
                             <CategoryIcon category={c} />
-                            <button className="list-main" style={{ textAlign: 'left' }} onClick={() => navigate('/lancamentos', { categoria: c.id, mes: month })}>
+                            <button className="list-main" style={{ textAlign: 'left' }} onClick={() => navigate('/movimentacoes', { categoria: c.id, mes: month })}>
                                 <span className="list-title">{c.name}</span>
                                 <span className="list-sub">{money(used)} / {money(c.budget)} utilizados</span>
                             </button>

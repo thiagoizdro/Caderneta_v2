@@ -5,12 +5,12 @@ import { addMonths, clampedDate, lastMonths } from '../src/lib/dates.js';
 import { CATEGORY_IDS, DEFAULT_ACCOUNT_ID, RECEIVABLE_ID, SALARY_RECURRENCE_ID } from '../src/lib/defaults.js';
 import { parseAmount } from '../src/lib/format.js';
 import {
-    accountBalances, budgetStatus, buildInstallments, buildWorkday, cardSummary, cashBalance, dailyReceipt,
+    accountBalances, availableAfterPlan, budgetStatus, buildInstallments, buildWorkday, cardSummary, cashBalance,
     dueRecurrenceTxs, forecastMonthEnd, goalProgress, installmentGroups, invoiceMonthFor,
-    invoicePeriod, monthTotals, monthlyReceipt, recurrenceDates, splitInstallments, upcomingCommitments,
-    validateWorkPayment, workdayLedger, billsLedger, billsPaidInMonth, buildBillPaymentTx, dueRecurringBills,
-    nextBillOccurrence, validateBillPayment,
+    invoicePeriod, monthTotals, monthlyReceipt, planSummary, recurrenceDates, splitInstallments, upcomingCommitments,
+    workdayMonth, workdayShare, workdaySummary,
 } from '../src/lib/finance.js';
+import { MIGRATION_ID, planMigration, planRevert } from '../src/lib/migration.js';
 import { buildInsights } from '../src/lib/insights.js';
 import { convertLegacy, readLegacyStorage } from '../src/lib/legacy.js';
 
@@ -70,14 +70,12 @@ describe('saldos', () => {
 });
 
 describe('modos Diária e Salário Mensal', () => {
-    test('recibo da diária separa gastos pessoais e terceiros', () => {
-        const txs = [
-            tx('workday:2026-09-01', { type: 'income', amount: 150, date: '2026-09-01', source: 'workday' }),
-            tx('workday:2026-09-02', { type: 'income', amount: 150, date: '2026-09-02', source: 'workday' }),
-            tx('p', { type: 'expense', amount: 40, date: '2026-09-02' }),
-            tx('3', { type: 'expense', amount: 60, date: '2026-09-02', person: 'João' }),
-        ];
-        assert.deepEqual(dailyReceipt(txs, '2026-09'), { days: 2, gross: 300, otherIncome: 0, personal: 40, thirdParty: 60, net: 260, real: 200 });
+    test('diárias do mês: dias e total trabalhado, sem virar receita', () => {
+        const days = [buildWorkday('2026-09-01', 150), buildWorkday('2026-09-02', 150), buildWorkday('2026-08-31', 150)];
+        const m = workdayMonth(workdaySummary(days, []), '2026-09');
+        assert.equal(m.count, 2);
+        assert.equal(m.worked, 300);
+        assert.equal(workdayMonth(workdaySummary(days, []), '2026-07').count, 0);
     });
 
     test('resumo do salário mensal', () => {
@@ -254,8 +252,10 @@ describe('categorias e migração da v1', () => {
 
         assert.equal(out.settings[0].mode, 'daily');
         assert.equal(out.settings[0].dailyRate, 150);
-        const receipt = dailyReceipt(out.transactions, '2026-09');
-        assert.deepEqual(receipt, { days: 2, gross: 300, otherIncome: 0, personal: 45.5, thirdParty: 100, net: 254.5, real: 154.5 });
+        // Dias trabalhados viram diárias (fora do saldo), não receitas.
+        assert.deepEqual(out.workdays.map((w) => [w.id, w.amount]), [['workday:2026-09-01', 150], ['workday:2026-09-02', 150]]);
+        assert.equal(monthTotals(out.transactions, '2026-09').income, 0);
+        assert.equal(monthTotals(out.transactions, '2026-09').expense, 145.5);
         assert.equal(out.transactions.find((t) => t.id === 'v1-1').categoryId, CATEGORY_IDS.food);
         assert.equal(out.transactions.find((t) => t.id === 'v1-2').person, 'Maria');
         assert.ok(out.transactions.every((t) => t.accountId === DEFAULT_ACCOUNT_ID));
@@ -316,197 +316,250 @@ describe('insights de cartão', () => {
     });
 });
 
-describe('diárias e pagamentos', () => {
-    const day = (date, amount = 100, fields = {}) => ({ ...buildWorkday(date, amount), ...fields });
-    const pay = (id, amount, date, fields = {}) => ({
-        id, type: 'transfer', source: 'workpayment', amount, date, accountId: RECEIVABLE_ID, toAccountId: 'b',
-        description: 'Pagamento de diárias', method: 'pix', workdayIds: [], ...fields,
-    });
-    // 12 diárias de R$ 100 = R$ 1.200,00
-    const twelve = Array.from({ length: 12 }, (_, i) => day(`2026-09-${String(i + 1).padStart(2, '0')}`));
+describe('diárias separadas do dinheiro', () => {
+    const eight = Array.from({ length: 8 }, (_, i) => buildWorkday(`2026-10-0${i + 1}`, 100));
+    const income = (id, amount, date, fields = {}) => tx(id, { type: 'income', amount, date, accountId: 'b', categoryId: CATEGORY_IDS.work, ...fields });
 
-    test('exemplo do escopo: 1.200 trabalhados, 700 recebidos, 500 a receber; +100 → 800 e 400', () => {
-        const txs = [...twelve, pay('p1', 700, '2026-09-15')];
-        const before = workdayLedger(txs).totals;
-        assert.equal(before.worked, 1200);
-        assert.equal(before.received, 700);
-        assert.equal(before.pending, 500);
-
-        const after = workdayLedger([...txs, pay('p2', 100, '2026-09-20')]).totals;
-        assert.equal(after.worked, 1200);
-        assert.equal(after.received, 800);
-        assert.equal(after.pending, 400);
+    test('exemplo do escopo: 8 dias × R$ 100 = R$ 800 trabalhados, R$ 0 recebidos, R$ 800 pendentes', () => {
+        const s = workdaySummary(eight, []);
+        assert.equal(s.totals.count, 8);
+        assert.equal(s.totals.worked, 800);
+        assert.equal(s.totals.received, 0);
+        assert.equal(s.totals.pending, 800);
     });
 
-    test('status por diária: paga, parcialmente paga e pendente', () => {
-        const ledger = workdayLedger([day('2026-09-01'), day('2026-09-02'), day('2026-09-03'), pay('p', 150, '2026-09-10')]);
-        assert.deepEqual(ledger.days.map((d) => [d.date, d.status, d.paid]), [
-            ['2026-09-01', 'paid', 100],
-            ['2026-09-02', 'partial', 50],
-            ['2026-09-03', 'pending', 0],
-        ]);
-        assert.deepEqual(ledger.payments[0].allocations.map((a) => a.amount), [100, 50]);
+    test('marcar, editar ou desmarcar diárias não muda saldo nem receitas', () => {
+        const txs = [tx('e', { type: 'expense', amount: 50, date: '2026-10-02', accountId: 'b' })];
+        const before = { cash: cashBalance([wallet, bank], txs), month: monthTotals(txs, '2026-10') };
+        // As diárias nem são transações: o saldo só enxerga `txs`.
+        for (const days of [eight, eight.slice(0, 3), eight.map((d) => ({ ...d, amount: 120 })), []]) {
+            workdaySummary(days, txs);
+            assert.equal(cashBalance([wallet, bank], txs), before.cash);
+            assert.deepEqual(monthTotals(txs, '2026-10'), before.month);
+        }
     });
 
-    test('pagamento vinculado quita as diárias escolhidas, mesmo de outro período', () => {
-        const txs = [day('2026-08-30', 120), day('2026-09-01'), day('2026-09-02'),
-            pay('p', 200, '2026-09-10', { workdayIds: ['workday:2026-09-02', 'workday:2026-09-01'] })];
-        const ledger = workdayLedger(txs);
-        assert.equal(ledger.byId.get('workday:2026-08-30').status, 'pending');
-        assert.equal(ledger.byId.get('workday:2026-09-01').status, 'paid');
-        assert.equal(ledger.byId.get('workday:2026-09-02').status, 'paid');
-        assert.equal(ledger.totals.pending, 120);
+    test('exemplo do escopo: R$ 868 recebidos = UMA receita (R$ 800 de diárias + R$ 68 complementares)', () => {
+        const pay = income('pix', 868, '2026-10-10', { workdayAmount: 800 });
+        const s = workdaySummary(eight, [pay]);
+        assert.equal(s.totals.received, 800);
+        assert.equal(s.totals.extra, 68);
+        assert.equal(s.totals.pending, 0);
+        assert.ok(s.days.every((d) => d.status === 'paid'));
+        // No dinheiro, entra uma vez só: R$ 868.
+        assert.equal(monthTotals([pay], '2026-10').income, 868);
+        assert.equal(cashBalance([bank], [pay]), 1000 + 868);
     });
 
-    test('pagamento sem vínculo não "rouba" a diária escolhida por outro', () => {
-        const txs = [day('2026-09-01'), day('2026-09-02'),
-            pay('geral', 100, '2026-09-05'),
-            pay('vinc', 100, '2026-09-06', { workdayIds: ['workday:2026-09-01'] })];
-        const ledger = workdayLedger(txs);
-        assert.deepEqual(ledger.payments.find((p) => p.tx.id === 'vinc').allocations.map((a) => a.id), ['workday:2026-09-01']);
-        assert.deepEqual(ledger.payments.find((p) => p.tx.id === 'geral').allocations.map((a) => a.id), ['workday:2026-09-02']);
-        assert.equal(ledger.totals.pending, 0);
+    test('receita sem vínculo não conta como pagamento de diárias; vínculo nunca passa do valor', () => {
+        assert.equal(workdayShare(income('x', 300, '2026-10-10')), 0);
+        assert.equal(workdayShare(income('y', 300, '2026-10-10', { workdayAmount: 500 })), 300);
+        assert.equal(workdayShare(tx('z', { type: 'expense', amount: 300, workdayAmount: 300, date: '2026-10-10' })), 0);
     });
 
-    test('excluir uma diária paga redistribui o pagamento ou vira crédito', () => {
-        const txs = [day('2026-09-01'), day('2026-09-02'), pay('p', 100, '2026-09-05', { workdayIds: ['workday:2026-09-01'] })];
-        const redistributed = workdayLedger(txs.filter((t) => t.id !== 'workday:2026-09-01'));
-        assert.equal(redistributed.byId.get('workday:2026-09-02').status, 'paid');
-        assert.equal(redistributed.totals.credit, 0);
-
-        const credit = workdayLedger([day('2026-09-02', 60), pay('p', 100, '2026-09-05')]);
-        assert.equal(credit.totals.pending, 0);
-        assert.equal(credit.totals.credit, 40);
+    test('recebimento parcial cobre as diárias mais antigas primeiro, por mês', () => {
+        const days = [buildWorkday('2026-09-30', 100), ...eight.slice(0, 3)];
+        const s = workdaySummary(days, [income('p', 150, '2026-10-05', { workdayAmount: 150 })]);
+        assert.deepEqual(s.days.map((d) => d.status), ['paid', 'partial', 'pending', 'pending']);
+        assert.equal(workdayMonth(s, '2026-09').remaining, 0);
+        assert.equal(workdayMonth(s, '2026-10').paid, 50);
+        assert.equal(workdayMonth(s, '2026-10').remaining, 250);
+        assert.equal(s.totals.pending, 250);
     });
 
-    test('diárias antigas (lançadas direto na conta) contam como recebidas', () => {
-        const legacyDay = day('2026-08-01', 150, { accountId: 'w' });
-        const ledger = workdayLedger([legacyDay, day('2026-09-01')]);
-        assert.equal(ledger.byId.get(legacyDay.id).status, 'paid');
-        assert.equal(ledger.totals.received, 150);
-        assert.equal(ledger.totals.pending, 100);
+    test('recebido além do trabalhado vira crédito, nunca pendente negativo', () => {
+        const s = workdaySummary([buildWorkday('2026-10-01', 60)], [income('p', 100, '2026-10-05', { workdayAmount: 100 })]);
+        assert.equal(s.totals.pending, 0);
+        assert.equal(s.totals.credit, 40);
     });
 
-    test('saldo a receber fica fora do dinheiro em contas e não duplica receita', () => {
-        const txs = [...twelve, pay('p1', 700, '2026-09-15')];
-        // Só o pagamento entra no saldo do banco (1.000 iniciais + 700).
-        assert.equal(cashBalance([wallet, bank], txs, '2026-09-30'), 100 + 1700);
-        // A receita do mês são as diárias (1.200); o pagamento não soma de novo.
-        assert.equal(monthTotals(txs, '2026-09').income, 1200);
-        assert.equal(dailyReceipt(txs, '2026-09').gross, 1200);
-        assert.equal(dailyReceipt(txs, '2026-09').otherIncome, 0);
-    });
-
-    test('validação: valor positivo e até o saldo pendente (sem adiantamento)', () => {
-        const ledger = workdayLedger([...twelve, pay('p1', 700, '2026-09-15')]);
-        assert.equal(validateWorkPayment(ledger, { amount: 100 }), null);
-        assert.equal(validateWorkPayment(ledger, { amount: 500 }), null);
-        assert.match(validateWorkPayment(ledger, { amount: 500.01 }), /saldo a receber \(R\$ 500,00\)/);
-        assert.match(validateWorkPayment(ledger, { amount: 0 }), /maior que zero/);
-        assert.match(validateWorkPayment(ledger, { amount: 150, workdayIds: ['workday:2026-09-12'] }), /diárias escolhidas \(R\$ 100,00\)/);
-        assert.match(validateWorkPayment(workdayLedger([day('2026-09-01'), pay('x', 100, '2026-09-02')]), { amount: 1 }), /todas as diárias já estão pagas/);
+    test('previsão de saldo não inclui diárias a receber', () => {
+        const f = forecastMonthEnd({ accounts: [bank], txs: [], recurrences: [], settings: { mode: 'daily', dailyRate: 100 }, today: '2026-10-10' });
+        assert.equal(f.end, 1000);
     });
 });
 
-describe('contas a pagar', () => {
-    const today = '2026-10-13';
-    const bill = (id, fields) => ({ id, description: id, amount: 100, dueDate: '2026-10-20', category: 'other', recurrence: 'once', ...fields });
+describe('planejamento de contas', () => {
+    const item = (id, description, amount, dueDate, fields = {}) => ({ id, description, amount, dueDate, ...fields });
 
-    test('exemplo do escopo: total R$ 1.500, reservado R$ 600, falta juntar R$ 900', () => {
-        const l = billsLedger({
-            bills: [bill('faculdade', { amount: 1000 }), bill('internet', { amount: 500 })],
-            reserveMoves: [{ id: 'r1', amount: 600, date: today }],
-        }, today);
-        assert.equal(l.totals.pending, 1500);
-        assert.equal(l.totals.reserve, 600);
-        assert.equal(l.totals.missing, 900);
-        assert.equal(l.totals.coverage, 0.4);
+    test('exemplo do escopo: Católica + UnB = R$ 867,01 necessários em outubro', () => {
+        const p = planSummary([item('unb', 'UnB', 409.49, '2026-10-20'), item('cat', 'Católica', 457.52, '2026-10-13')]);
+        assert.equal(p.total, 867.01);
+        assert.deepEqual(p.items.map((b) => b.description), ['Católica', 'UnB']);
+        assert.deepEqual(p.months.map((m) => [m.ym, m.total]), [['2026-10', 867.01]]);
     });
 
-    test('exemplo do escopo: conta de R$ 800 com pagamento de R$ 300 fica com R$ 500 e histórico', () => {
-        const l = billsLedger({ bills: [bill('carro', { amount: 800 })], payments: [{ id: 'p1', billId: 'carro', amount: 300, date: today }] }, today);
-        const e = l.byId.get('carro');
-        assert.equal(e.remaining, 500);
-        assert.equal(e.status, 'partial');
-        assert.equal(e.payments.length, 1);
-        assert.equal(l.totals.pending, 500);
+    test('exemplo do escopo: disponível após planejamento = saldo − planejado (R$ 1.200 − R$ 867,01)', () => {
+        assert.equal(availableAfterPlan(1200, 867.01), 332.99);
     });
 
-    test('status: paga, vencida, vence em breve e dias para vencer', () => {
-        const l = billsLedger({
-            bills: [
-                bill('paga', { amount: 50 }),
-                bill('atrasada', { dueDate: '2026-10-10' }),
-                bill('breve', { dueDate: '2026-10-15' }),
-                bill('longe', { dueDate: '2026-11-30' }),
-            ],
-            payments: [{ id: 'p', billId: 'paga', amount: 50, date: today }],
-        }, today);
-        assert.equal(l.byId.get('paga').status, 'paid');
-        assert.equal(l.byId.get('atrasada').status, 'overdue');
-        assert.equal(l.byId.get('atrasada').daysLeft, -3);
-        assert.equal(l.byId.get('breve').soon, true);
-        assert.equal(l.byId.get('longe').soon, false);
-        assert.equal(l.totals.overdueCount, 1);
-        assert.deepEqual(l.bills.map((e) => e.id), ['atrasada', 'breve', 'paga', 'longe']);
+    test('adicionar R$ 500 ao planejamento só aumenta o total planejado', () => {
+        const txs = [tx('e', { type: 'expense', amount: 80, date: '2026-10-02', accountId: 'b' })];
+        const bills = [item('a', 'A', 100, '2026-10-20')];
+        const before = { plan: planSummary(bills).total, cash: cashBalance([bank], txs), month: monthTotals(txs, '2026-10') };
+        const after = planSummary([...bills, item('b', 'B', 500, '2026-10-25')]);
+        assert.equal(after.total, before.plan + 500);
+        assert.equal(cashBalance([bank], txs), before.cash);
+        assert.deepEqual(monthTotals(txs, '2026-10'), before.month);
     });
 
-    test('pagamento usando a reserva diminui a reserva e não a conta duas vezes', () => {
-        const bank2 = { ...bank, initialBalance: 1000 };
-        const b = bill('luz', { amount: 200 });
-        const payment = { id: 'p1', billId: 'luz', amount: 200, fromReserve: 150, date: today, mode: 'expense', accountId: bank2.id, categoryId: CATEGORY_IDS.home };
-        const l = billsLedger({ bills: [b], payments: [payment], reserveMoves: [{ id: 'r', amount: 150, date: today }] }, today);
-        assert.equal(l.totals.reserve, 0);
-        assert.equal(l.totals.pending, 0);
-        const txPay = buildBillPaymentTx(payment, b);
-        assert.equal(txPay.id, 'billpay:p1');
-        assert.equal(txPay.type, 'expense');
-        // Saldo cai uma vez só (depósito na reserva não é lançamento).
-        assert.equal(cashBalance([bank2], [txPay], today), 800);
+    test('itens arquivados (contas quitadas antes da 3.0) ficam fora; vários meses ficam separados', () => {
+        const p = planSummary([item('a', 'A', 100, '2026-10-20'), item('b', 'B', 50, '2026-11-05'), item('c', 'C', 999, '2026-10-01', { archived: true })]);
+        assert.equal(p.total, 150);
+        assert.deepEqual(p.months.map((m) => [m.ym, m.total]), [['2026-10', 100], ['2026-11', 50]]);
     });
 
-    test('fatura do cartão vira transferência e "já lançado" não cria lançamento', () => {
-        const b = bill('fatura', { category: 'card', amount: 300 });
-        const t = buildBillPaymentTx({ id: 'p', amount: 300, date: today, mode: 'transfer', accountId: bank.id, toAccountId: card.id }, b);
-        assert.equal(t.type, 'transfer');
-        assert.equal(monthTotals([t], '2026-10').expense, 0);
-        assert.equal(buildBillPaymentTx({ id: 'q', amount: 300, date: today, mode: 'none' }, b), null);
+    test('itens do planejamento aparecem nos próximos compromissos só como aviso', () => {
+        const items = upcomingCommitments({ accounts: [bank], txs: [], recurrences: [], today: '2026-10-13', days: 7, bills: [item('net', 'Internet', 120, '2026-10-15'), item('fora', 'Fora', 1, '2026-12-01')] });
+        assert.deepEqual(items.map((i) => [i.kind, i.description, i.amount]), [['bill', 'Internet', 120]]);
+    });
+});
+
+describe('migração 3.0', () => {
+    const accounts = [wallet, bank];
+    const oldDay = (date, amount = 100, fields = {}) => ({
+        id: `workday:${date}`, type: 'income', amount, description: 'Dia trabalhado', date, source: 'workday',
+        categoryId: CATEGORY_IDS.work, accountId: RECEIVABLE_ID, updatedAt: 1000, ...fields,
+    });
+    const oldPay = (id, amount, date, fields = {}) => ({
+        id, type: 'transfer', source: 'workpayment', amount, date, accountId: RECEIVABLE_ID, toAccountId: 'b',
+        description: 'Pagamento de diárias', method: 'pix', workdayIds: [], updatedAt: 2000, ...fields,
+    });
+    const data = () => ({
+        accounts,
+        transactions: [
+            oldDay('2026-09-01'), oldDay('2026-09-02'), oldDay('2026-09-03'),
+            oldDay('2026-08-01', 150, { accountId: 'w' }), // antiga, direto na carteira
+            oldPay('p1', 200, '2026-09-10'),
+            tx('mercado', { type: 'expense', amount: 40, date: '2026-09-05', accountId: 'b', updatedAt: 1 }),
+            tx('billpay:x', { type: 'expense', amount: 300, date: '2026-09-06', accountId: 'b', source: 'billpayment', updatedAt: 1 }),
+            tx('manual', { type: 'income', amount: 200, date: '2026-09-10', accountId: 'w', source: 'manual', description: 'Pagamento empresa', updatedAt: 1 }),
+        ],
+        workdays: [],
+        bills: [
+            { id: 'quitada', description: 'Quitada', amount: 300, dueDate: '2026-09-20', updatedAt: 5 },
+            { id: 'parcial', description: 'Parcial', amount: 800, dueDate: '2026-10-20', updatedAt: 5 },
+            { id: 'nova', description: 'Nova', amount: 100, dueDate: '2026-10-25', updatedAt: 5 },
+        ],
+        billPayments: [{ id: 'x', billId: 'quitada', amount: 300 }, { id: 'y', billId: 'parcial', amount: 300 }],
     });
 
-    test('valida pagamento acima do pendente e uso indevido da reserva', () => {
-        const l = billsLedger({ bills: [bill('x', { amount: 800 })], payments: [{ id: 'p', billId: 'x', amount: 300, date: today }] }, today);
-        const e = l.byId.get('x');
-        assert.match(validateBillPayment(e, 0, { amount: 600 }), /passa do que falta/);
-        assert.match(validateBillPayment(e, 0, { amount: 0 }), /maior que zero/);
-        assert.match(validateBillPayment(e, 100, { amount: 200, fromReserve: 150 }), /reserva tem só/);
-        assert.match(validateBillPayment(e, 500, { amount: 200, fromReserve: 250 }), /não pode passar do valor pago/);
-        assert.equal(validateBillPayment(e, 500, { amount: 500, fromReserve: 500 }), null);
-        assert.equal(billsPaidInMonth([{ amount: 300, date: '2026-10-01' }, { amount: 50, date: '2026-09-30' }], '2026-10'), 300);
+    const apply = (input, plan) => {
+        const upd = new Map([...plan.txUpdates, ...plan.txDeletes.map((t) => ({ ...t, deleted: 1 }))].map((t) => [t.id, t]));
+        const bills = new Map(plan.billUpdates.map((b) => [b.id, b]));
+        return {
+            ...input,
+            transactions: input.transactions.map((t) => upd.get(t.id) || t),
+            workdays: [...input.workdays, ...plan.newWorkdays],
+            bills: input.bills.map((b) => bills.get(b.id) || b),
+        };
+    };
+    const alive = (rows) => rows.filter((r) => !r.deleted);
+
+    test('saldos de todas as contas iguais antes e depois', () => {
+        const input = data();
+        const plan = planMigration(input);
+        assert.equal(plan.balance.ok, true);
+        const after = apply(input, plan);
+        assert.deepEqual(accountBalances(accounts, alive(after.transactions)), accountBalances(accounts, input.transactions));
     });
 
-    test('conta mensal: gera a próxima só depois de paga, sem duplicar', () => {
-        const jan = bill('fac', { recurrence: 'monthly', dueDate: '2027-01-31', dueDay: 31, amount: 900 });
-        const unpaid = billsLedger({ bills: [jan] }, today);
-        assert.equal(dueRecurringBills(unpaid, new Set(['fac'])).length, 0);
-
-        const paid = billsLedger({ bills: [jan], payments: [{ id: 'p', billId: 'fac', amount: 900, date: today }] }, today);
-        const [feb] = dueRecurringBills(paid, new Set(['fac']));
-        assert.equal(feb.id, 'fac:2027-02');
-        assert.equal(feb.dueDate, '2027-02-28');
-        assert.equal(feb.seriesId, 'fac');
-        assert.equal(feb.amount, 900);
-        // Já existe (ou foi excluída): não gera de novo.
-        assert.equal(dueRecurringBills(paid, new Set(['fac', 'fac:2027-02'])).length, 0);
-        // Volta ao dia 31 quando o mês tem 31 dias.
-        assert.equal(nextBillOccurrence(nextBillOccurrence(jan)).dueDate, '2027-03-31');
-        // Conta única não gera nada.
-        const once = billsLedger({ bills: [bill('u')], payments: [{ id: 'p', billId: 'u', amount: 100, date: today }] }, today);
-        assert.equal(dueRecurringBills(once, new Set(['u'])).length, 0);
+    test('diárias viram registros próprios; a receber sai das transações, pagamento vira receita real', () => {
+        const input = data();
+        const after = apply(input, planMigration(input));
+        assert.deepEqual(after.workdays.map((w) => w.id).sort(), ['workday:2026-08-01', 'workday:2026-09-01', 'workday:2026-09-02', 'workday:2026-09-03']);
+        const live = alive(after.transactions);
+        assert.equal(live.filter((t) => t.source === 'workday').length, 0);
+        const p1 = live.find((t) => t.id === 'p1');
+        assert.equal(p1.type, 'income');
+        assert.equal(p1.accountId, 'b');
+        assert.equal(p1.workdayAmount, 200);
+        // Receitas de setembro: só dinheiro real (pagamento 200 + receita manual 200), não as diárias.
+        assert.equal(monthTotals(live, '2026-09').income, 400);
+        // Despesa de conta paga continua lá.
+        assert.ok(live.some((t) => t.id === 'billpay:x'));
+        // Diárias: 450 trabalhados, 150 (antiga, já no saldo) + 200 recebidos.
+        const s = workdaySummary(after.workdays, live);
+        assert.equal(s.totals.worked, 450);
+        assert.equal(s.totals.received, 350);
+        assert.equal(s.totals.pending, 100);
     });
 
-    test('contas em aberto entram nos próximos compromissos', () => {
-        const l = billsLedger({ bills: [bill('net', { dueDate: '2026-10-15', amount: 120 }), bill('fora', { dueDate: '2026-12-01' })] }, today);
-        const items = upcomingCommitments({ accounts: [bank], txs: [], recurrences: [], today, days: 7, bills: l.bills });
-        assert.deepEqual(items.map((i) => [i.kind, i.description, i.amount]), [['bill', 'net', 120]]);
+    test('planejamento: quitada sai, parcial fica com o que faltava, nada é apagado', () => {
+        const input = data();
+        const after = apply(input, planMigration(input));
+        assert.equal(after.bills.length, 3);
+        assert.equal(after.bills.find((b) => b.id === 'quitada').archived, true);
+        assert.equal(after.bills.find((b) => b.id === 'parcial').amount, 500);
+        assert.equal(planSummary(after.bills).total, 600);
+    });
+
+    test('relatório aponta diária antiga, contas e possível duplicação', () => {
+        const plan = planMigration(data());
+        const kinds = plan.review.map((r) => `${r.kind}:${r.id}`);
+        assert.ok(kinds.includes('legacy-workday:workday:2026-08-01'));
+        assert.ok(kinds.includes('possible-duplicate:manual'));
+        assert.ok(kinds.includes('bill-paid:quitada'));
+        assert.ok(kinds.includes('bill-partial:parcial'));
+        assert.equal(plan.counts.paymentsConverted, 1);
+        assert.equal(plan.counts.receivableWorkdaysRemoved, 3);
+    });
+
+    test('não roda duas vezes sobre os mesmos registros', () => {
+        const input = data();
+        const once = apply(input, planMigration(input));
+        assert.equal(planMigration(once).changes, 0);
+    });
+
+    test('carimbo determinístico: anterior + 1 (edições reais feitas depois vencem)', () => {
+        const plan = planMigration(data());
+        assert.equal(plan.txUpdates.find((t) => t.id === 'p1').updatedAt, 2001);
+        assert.equal(plan.newWorkdays.find((w) => w.id === 'workday:2026-09-01').updatedAt, 1001);
+        assert.ok(plan.txUpdates.every((t) => t.migration.id === MIGRATION_ID));
+    });
+
+    test('é reversível: desfazer devolve os registros ao formato antigo', () => {
+        const input = data();
+        const after = apply(input, planMigration(input));
+        const r = planRevert(after);
+        const restored = new Map([...r.txRestores, ...r.txRevives].map((t) => [t.id, t]));
+        const back = after.transactions.map((t) => restored.get(t.id) || t);
+        for (const original of input.transactions) {
+            const t = back.find((x) => x.id === original.id);
+            const { updatedAt: _a, ...o } = original;
+            const { updatedAt: _b, deleted, ...b } = t;
+            assert.ok(!deleted, original.id);
+            assert.deepEqual(b, o, original.id);
+        }
+        assert.equal(r.workdayDeletes.length, 4);
+        const bills = new Map(r.billRestores.map((b) => [b.id, b]));
+        assert.equal(bills.get('parcial').amount, 800);
+        assert.equal(bills.get('quitada').archived, undefined);
+    });
+
+    test('desfazer e aplicar de novo recria os dias; dia desmarcado pelo usuário continua desmarcado', () => {
+        const input = data();
+        const after = apply(input, planMigration(input));
+        const r = planRevert(after);
+        const restored = new Map([...r.txRestores, ...r.txRevives].map((t) => [t.id, t]));
+        const tomb = new Map(r.workdayDeletes.map((w) => [w.id, w]));
+        const reverted = { ...after, transactions: after.transactions.map((t) => restored.get(t.id) || t), workdays: after.workdays.map((w) => tomb.get(w.id) || w) };
+        const again = planMigration(reverted);
+        assert.equal(again.newWorkdays.length, 4);
+        assert.ok(again.newWorkdays.every((w) => w.updatedAt > tomb.get(w.id).updatedAt));
+        const final = apply(reverted, again);
+        const live = (rows) => new Map(rows.map((w) => [w.id, w]));
+        assert.equal(workdaySummary([...live(final.workdays).values()].filter((w) => !w.deleted), alive(final.transactions)).totals.worked, 450);
+
+        // Dia desmarcado pelo usuário (lápide sem "reverted") não volta.
+        const unmarked = { ...data(), workdays: [{ id: 'workday:2026-09-01', date: '2026-09-01', amount: 100, deleted: 1, updatedAt: 5000 }] };
+        assert.ok(!planMigration(unmarked).newWorkdays.some((w) => w.id === 'workday:2026-09-01'));
+    });
+
+    test('se o saldo mudasse, a validação acusa', () => {
+        // Diária "a receber" apontando para uma conta real: removê-la mudaria o saldo.
+        const input = { ...data(), transactions: [oldDay('2026-09-01', 100, { accountId: 'b', type: 'transfer' })] };
+        const plan = planMigration(input);
+        assert.equal(plan.balance.ok, false);
     });
 });

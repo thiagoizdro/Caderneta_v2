@@ -1,21 +1,17 @@
 import { Plus } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { materializeBills } from './lib/bills.js';
-import { materializeRecurrences } from './lib/bootstrap.js';
+import { materializeRecurrences, runV3Migration } from './lib/bootstrap.js';
 import { runDailyReminders } from './lib/notify.js';
-import { startAutoSync } from './lib/sync.js';
-import { NAV_GROUPS, NAV_ITEMS, useNavItems } from './components/nav.js';
-import { BillPaymentForm } from './components/BillForms.jsx';
+import { startAutoSync, syncNow } from './lib/sync.js';
+import { NAV_GROUPS, useNavItems } from './components/nav.js';
 import { Icon } from './components/Icon.jsx';
 import { SearchPalette } from './components/SearchPalette.jsx';
-import { PaymentForm } from './components/PaymentForm.jsx';
 import { TransactionForm } from './components/TransactionForm.jsx';
 import { ConfirmDialog, Modal, Toasts } from './components/ui.jsx';
 import { UIContext, navigate, useData, useRoute, useSyncState, useUI } from './state.jsx';
 import { Accounts } from './pages/Accounts.jsx';
 import { Bills } from './pages/Bills.jsx';
 import { Budget } from './pages/Budget.jsx';
-import { CalendarPage } from './pages/CalendarPage.jsx';
 import { Dashboard } from './pages/Dashboard.jsx';
 import { Diarias } from './pages/Diarias.jsx';
 import { Goals } from './pages/Goals.jsx';
@@ -28,11 +24,10 @@ import { Transactions } from './pages/Transactions.jsx';
 
 const ROUTES = {
     '/': Dashboard,
-    '/lancamentos': Transactions,
-    '/calendario': CalendarPage,
+    '/movimentacoes': Transactions,
     '/diarias': Diarias,
+    '/planejamento': Bills,
     '/contas': Accounts,
-    '/contas-a-pagar': Bills,
     '/recorrentes': Recurring,
     '/orcamento': Budget,
     '/metas': Goals,
@@ -56,7 +51,7 @@ function Sidebar({ path }) {
                 </span>
             </a>
             <button className="sidebar-cta" onClick={() => ui.openTx()}>
-                <Plus size={18} aria-hidden="true" /> Novo lançamento <kbd>N</kbd>
+                <Plus size={18} aria-hidden="true" /> Nova movimentação <kbd>N</kbd>
             </button>
             <nav>
                 {navItems.map((item) => {
@@ -90,24 +85,29 @@ function Sidebar({ path }) {
     );
 }
 
+// Barra inferior do celular: as quatro páginas principais e o botão de nova
+// movimentação no meio. O resto fica em "Mais" (ícone no topo da página).
 function BottomNav({ path }) {
     const ui = useUI();
-    const items = [NAV_ITEMS[0], NAV_ITEMS[1], null, NAV_ITEMS[2], { path: '/mais', label: 'Mais', icon: 'menu' }];
-    const inMore = !['/', '/lancamentos', '/calendario'].includes(path);
+    const main = useNavItems().filter((n) => n.group === 'main');
+    // Sem diárias, o quarto lugar vai para Contas e cartões.
+    const four = main.length >= 4 ? main.slice(0, 4) : [...main, { path: '/contas', label: 'Contas', icon: 'card' }];
+    const items = [four[0], four[1], null, four[2], four[3]];
     return (
         <nav className="bottom-nav" aria-label="Navegação">
             {items.map((item) => item ? (
                 <a
                     key={item.path}
                     href={`#${item.path}`}
-                    className={`bottom-link${path === item.path || (item.path === '/mais' && inMore) ? ' active' : ''}`}
+                    className={`bottom-link${path === item.path ? ' active' : ''}`}
                     aria-current={path === item.path ? 'page' : undefined}
                 >
-                    <Icon name={item.icon} size={21} />
-                    {item.label === 'Lançamentos' ? 'Extrato' : item.label}
+                    <Icon name={item.icon} size={22} />
+                    {/* Hífen opcional: em telas estreitas quebra como "Movimen-tações". */}
+                    <span>{item.label.replace('Movimentações', 'Movimen­tações')}</span>
                 </a>
             ) : (
-                <button key="fab" className="bottom-fab" onClick={() => ui.openTx()} aria-label="Novo lançamento">
+                <button key="fab" className="bottom-fab" onClick={() => ui.openTx()} aria-label="Nova movimentação">
                     <Plus size={26} strokeWidth={2.5} />
                 </button>
             ))}
@@ -147,8 +147,6 @@ export function App({ migrated, bootError }) {
     const { path, params } = useRoute();
     const [toasts, setToasts] = useState([]);
     const [txModal, setTxModal] = useState(null);
-    const [payModal, setPayModal] = useState(null);
-    const [billPayModal, setBillPayModal] = useState(null);
     const [searchOpen, setSearchOpen] = useState(false);
     const [dialog, setDialog] = useState(null);
     const bootstrapped = useRef(false);
@@ -161,15 +159,8 @@ export function App({ migrated, bootError }) {
 
     const ui = useMemo(() => ({
         toast,
-        // Pagamentos de diárias têm formulário próprio (valor, forma, diárias cobertas).
-        // Pagamentos de contas a pagar também: o lançamento é derivado do pagamento.
-        openTx: (initial = {}) => {
-            if (initial?.source === 'workpayment') setPayModal({ key: Date.now(), payment: initial });
-            else if (initial?.source === 'billpayment' && initial.paymentId) setBillPayModal({ key: Date.now(), paymentId: initial.paymentId });
-            else setTxModal({ key: Date.now(), initial });
-        },
-        openPayment: (payment = null) => setPayModal({ key: Date.now(), payment }),
-        openBillPayment: ({ billId, paymentId, full } = {}) => setBillPayModal({ key: Date.now(), billId, paymentId, full }),
+        // Toda movimentação (inclusive o recebimento das diárias) usa o mesmo formulário.
+        openTx: (initial = {}) => setTxModal({ key: Date.now(), initial }),
         openSearch: () => setSearchOpen(true),
         confirm: (opts) => new Promise((resolve) => setDialog({ kind: 'confirm', opts, resolve })),
         choose: (opts) => new Promise((resolve) => setDialog({ kind: 'choose', opts, resolve })),
@@ -177,23 +168,31 @@ export function App({ migrated, bootError }) {
 
     useServiceWorker(toast);
 
-    // Inicialização: padrões, migração da v1, recorrências vencidas e sincronização.
+    // Inicialização: padrões, migração da v1, sincronização, migração 3.0 e recorrências.
+    // A 3.0 roda depois de sincronizar, para trabalhar sobre os dados mais novos.
     useEffect(() => {
         if (bootstrapped.current) return;
         bootstrapped.current = true;
         if (bootError) toast('Não foi possível abrir o banco local deste navegador.', 'error', null, 10000);
         if (migrated) toast(`Dados da versão anterior importados (${migrated.transactions} lançamentos).`, 'success', null, 6000);
-        Promise.allSettled([materializeRecurrences(), materializeBills()]).finally(startAutoSync);
+        syncNow()
+            .catch(() => {})
+            .then(runV3Migration)
+            .then((run) => {
+                if (run?.aborted) toast('A atualização das diárias foi adiada: os saldos não bateram. Veja Ajustes → Atualização 3.0.', 'error', null, 12000);
+                else if (run) toast('Caderneta atualizada: diárias e planejamento agora ficam fora do saldo.', 'success', { label: 'Ver relatório', run: () => navigate('/ajustes', { secao: 'atualizacao' }) }, 12000);
+            })
+            .catch((error) => console.error(error))
+            .finally(() => materializeRecurrences().finally(startAutoSync));
     }, [toast, migrated, bootError]);
 
     // Recorrências que vencem com o app aberto (virada do dia) e lembretes.
     useEffect(() => {
         if (!data.profile?.onboarded) return;
         materializeRecurrences(data.today);
-        materializeBills(data.today);
         runDailyReminders({
             accounts: data.accounts, txs: data.transactions, recurrences: data.recurrences,
-            categories: data.categories, settings: data.profile, bills: data.billLedger,
+            categories: data.categories, settings: data.profile, bills: data.plan.items, workdays: data.workdays,
         });
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [data.today, data.profile?.onboarded]);
@@ -205,16 +204,16 @@ export function App({ migrated, bootError }) {
             if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
                 e.preventDefault();
                 setSearchOpen(true);
-            } else if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'n' && !txModal && !payModal && !billPayModal && !searchOpen && !dialog) {
+            } else if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'n' && !txModal && !searchOpen && !dialog) {
                 e.preventDefault();
                 ui.openTx();
             }
         };
         document.addEventListener('keydown', onKey);
         return () => document.removeEventListener('keydown', onKey);
-    }, [ui, txModal, payModal, billPayModal, searchOpen, dialog]);
+    }, [ui, txModal, searchOpen, dialog]);
 
-    // Atalho do PWA / links: #/lancamentos?novo=1
+    // Atalho do PWA / links: #/movimentacoes?novo=1
     useEffect(() => {
         if (params.novo === '1') {
             ui.openTx();
@@ -223,8 +222,6 @@ export function App({ migrated, bootError }) {
     }, [params.novo, path, ui]);
 
     const closeTx = useCallback(() => setTxModal(null), []);
-    const closePay = useCallback(() => setPayModal(null), []);
-    const closeBillPay = useCallback(() => setBillPayModal(null), []);
     const closeSearch = useCallback(() => setSearchOpen(false), []);
 
     const Page = ROUTES[path] || Dashboard;
@@ -245,10 +242,6 @@ export function App({ migrated, bootError }) {
             )}
 
             {txModal && <TransactionForm key={txModal.key} initial={txModal.initial} onClose={closeTx} />}
-            {payModal && <PaymentForm key={payModal.key} payment={payModal.payment} onClose={closePay} />}
-            {billPayModal && (
-                <BillPaymentForm key={billPayModal.key} billId={billPayModal.billId} paymentId={billPayModal.paymentId} full={billPayModal.full} onClose={closeBillPay} />
-            )}
             {searchOpen && (
                 <SearchPalette
                     onClose={closeSearch}

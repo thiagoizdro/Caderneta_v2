@@ -1,15 +1,16 @@
 // Rotinas de inicialização: registros padrão, geração das recorrências
-// vencidas e migração automática dos dados do Caderneta 1.x.
+// vencidas, migração automática dos dados do Caderneta 1.x e migração 3.0.
 
 import { parseISODate, todayISO } from './dates.js';
-import { db, getMeta, setMeta } from './db.js';
+import { COLLECTIONS, db, getMeta, setMeta } from './db.js';
 import {
     CATEGORY_IDS, DEFAULT_ACCOUNTS, DEFAULT_ACCOUNT_ID, DEFAULT_CATEGORIES,
     PROFILE_ID, SALARY_RECURRENCE_ID, SEED_UPDATED_AT,
 } from './defaults.js';
 import { dueRecurrenceTxs, withScheduleChange } from './finance.js';
 import { convertLegacy, readLegacyStorage } from './legacy.js';
-import { save, saveMany } from './store.js';
+import { planMigration, planRevert } from './migration.js';
+import { putRows, save, saveMany } from './store.js';
 
 const alive = (rows) => rows.filter((r) => !r.deleted);
 
@@ -85,6 +86,7 @@ export async function importLegacyData(raw) {
     const converted = convertLegacy(raw, { today: todayISO() });
     await ensureDefaults();
     await saveMany('transactions', converted.transactions);
+    await saveMany('workdays', converted.workdays);
     await saveMany('recurrences', converted.recurrences);
     const existing = await db.settings.get(PROFILE_ID);
     if (!existing || existing.deleted || !existing.onboarded) {
@@ -111,4 +113,85 @@ export async function migrateLegacyStorage() {
     if (!legacy) return null;
     const converted = await importLegacyData(legacy);
     return { transactions: converted.transactions.length };
+}
+
+// ------------------------------------------------------------
+// Migração 3.0: diárias fora das movimentações, planejamento de contas
+// ------------------------------------------------------------
+
+const REPORT_KEY = 'migration:v3:report';
+const BACKUP_KEY = 'migration:v3:backup';
+
+const MIGRATED_COLLECTIONS = ['transactions', 'workdays', 'bills', 'billPayments', 'accounts'];
+
+async function readAll(collections) {
+    const entries = await Promise.all(collections.map(async (c) => [c, await db.table(c).toArray()]));
+    return Object.fromEntries(entries);
+}
+
+async function appendReport(run) {
+    const report = (await getMeta(REPORT_KEY)) || { runs: [] };
+    report.runs = [...report.runs, run].slice(-10);
+    await setMeta(REPORT_KEY, report);
+}
+
+export function getMigrationReport() {
+    return getMeta(REPORT_KEY);
+}
+
+export async function getMigrationBackup() {
+    return getMeta(BACKUP_KEY);
+}
+
+/**
+ * Aplica a migração 3.0 no que ainda não foi migrado. Antes da primeira
+ * gravação guarda uma cópia completa do banco local. Se o saldo de qualquer
+ * conta mudar no cálculo, nada é gravado e o relatório registra o motivo.
+ * Seguro para rodar a cada abertura: registros já migrados são pulados.
+ */
+export async function runV3Migration() {
+    const profile = await db.settings.get(PROFILE_ID);
+    if (profile?.migrationV3 === 'reverted') return null;
+
+    const plan = planMigration(await readAll(MIGRATED_COLLECTIONS));
+    if (!plan.changes) return null;
+
+    const run = { at: new Date().toISOString(), counts: plan.counts, balance: plan.balance, review: plan.review };
+    if (!plan.balance.ok) {
+        await appendReport({ ...run, aborted: true });
+        return { ...run, aborted: true };
+    }
+
+    if (!(await getMeta(BACKUP_KEY))) {
+        await setMeta(BACKUP_KEY, { createdAt: run.at, data: await readAll(COLLECTIONS) });
+    }
+    await putRows('workdays', plan.newWorkdays);
+    await putRows('transactions', [...plan.txUpdates, ...plan.txDeletes.map((t) => ({ ...t, deleted: 1 }))]);
+    await putRows('bills', plan.billUpdates);
+    await appendReport(run);
+    if (profile && !profile.deleted && profile.migrationV3 !== 'done') await save('settings', { ...profile, migrationV3: 'done' });
+    return run;
+}
+
+/** Desfaz a migração 3.0 e impede que ela rode de novo sozinha. */
+export async function revertV3Migration() {
+    const plan = planRevert(await readAll(['transactions', 'workdays', 'bills']));
+    await putRows('transactions', [...plan.txRestores, ...plan.txRevives]);
+    await putRows('bills', plan.billRestores);
+    await putRows('workdays', plan.workdayDeletes);
+    const profile = await db.settings.get(PROFILE_ID);
+    if (profile && !profile.deleted) await save('settings', { ...profile, migrationV3: 'reverted' });
+    await appendReport({ at: new Date().toISOString(), reverted: true, counts: {
+        transactionsRestored: plan.txRestores.length + plan.txRevives.length,
+        billsRestored: plan.billRestores.length,
+        workdaysRemoved: plan.workdayDeletes.length,
+    } });
+    return plan;
+}
+
+/** Volta a permitir a migração depois de um "desfazer" e a aplica. */
+export async function reapplyV3Migration() {
+    const profile = await db.settings.get(PROFILE_ID);
+    if (profile && !profile.deleted) await save('settings', { ...profile, migrationV3: 'done' });
+    return runV3Migration();
 }
