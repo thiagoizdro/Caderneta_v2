@@ -202,7 +202,7 @@ function CreditCardPanel({ card, onEdit }) {
                 </div>
             )}
             <div className="row wrap">
-                <a className="btn btn-secondary btn-sm" href={`#/lancamentos?conta=${card.id}&mes=${s.current.ym}`}>Ver lançamentos</a>
+                <a className="btn btn-secondary btn-sm" href={`#/movimentacoes?conta=${card.id}&mes=${s.current.ym}`}>Ver lançamentos</a>
                 {s.current.amount > 0 && <button className="btn btn-ghost btn-sm" onClick={() => pay(s.current)}>Adiantar pagamento</button>}
             </div>
         </div>

@@ -5,7 +5,7 @@ import { BalanceChart, CategoryBars, IncomeExpenseChart } from '../components/Ch
 import { Delta, EmptyState, MonthPicker } from '../components/ui.jsx';
 import { exportTransactionsCsv } from '../lib/backup.js';
 import { addMonthsToMonth, lastMonths, monthLabel, monthOf } from '../lib/dates.js';
-import { balanceSeries, dailyReceipt, expensesByCategory, monthTotals, monthlySeries } from '../lib/finance.js';
+import { balanceSeries, expensesByCategory, monthTotals, monthlySeries, workdayMonth } from '../lib/finance.js';
 import { money } from '../lib/format.js';
 import { navigate, useData } from '../state.jsx';
 
@@ -43,10 +43,9 @@ export function Reports() {
         { label: 'Resultado', now: nowT.net, prev: prevT.net, up: true },
     ];
     if (profile.mode === 'daily') {
-        const a = dailyReceipt(transactions, month);
-        const b = dailyReceipt(transactions, prev);
-        compareRows.push({ label: 'Dias trabalhados', now: a.days, prev: b.days, up: true, plain: true });
-        compareRows.push({ label: 'Repasses a terceiros', now: a.thirdParty, prev: b.thirdParty, up: false });
+        const thirdParty = (ym) => transactions.filter((t) => t.type === 'expense' && t.person && t.date.startsWith(ym)).reduce((acc, t) => acc + t.amount, 0);
+        compareRows.push({ label: 'Dias trabalhados', now: workdayMonth(data.work, month).count, prev: workdayMonth(data.work, prev).count, up: true, plain: true });
+        compareRows.push({ label: 'Repasses a terceiros', now: thirdParty(month), prev: thirdParty(prev), up: false });
     }
 
     return (
@@ -83,7 +82,7 @@ export function Reports() {
                 <div className="card">
                     <div className="card-head"><h2>Despesas por categoria</h2><span className="sub">{monthLabel(month)}</span></div>
                     {catTotal > 0
-                        ? <CategoryBars items={cats.filter((c) => c.value > 0)} total={catTotal} limit={10} onSelect={(c) => navigate('/lancamentos', { categoria: c.id, mes: month })} />
+                        ? <CategoryBars items={cats.filter((c) => c.value > 0)} total={catTotal} limit={10} onSelect={(c) => navigate('/movimentacoes', { categoria: c.id, mes: month })} />
                         : <EmptyState icon="chart" title="Sem despesas neste mês" />}
                 </div>
 

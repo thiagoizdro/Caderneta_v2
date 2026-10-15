@@ -3,7 +3,7 @@ import { createContext, useContext, useEffect, useMemo, useState, useSyncExterna
 import { COLLECTIONS, db } from './lib/db.js';
 import { todayISO } from './lib/dates.js';
 import { PROFILE_ID } from './lib/defaults.js';
-import { billsLedger, workdayLedger } from './lib/finance.js';
+import { planSummary, workdaySummary } from './lib/finance.js';
 import { getSyncState, subscribeSync } from './lib/sync.js';
 
 // ------------------------------------------------------------
@@ -51,15 +51,15 @@ export function DataProvider({ children }) {
             categories: categoriesAll.filter((c) => !c.archived),
             allCategories: categoriesAll,
             transactions,
-            // Diárias trabalhadas × pagamentos recebidos (status, totais, histórico).
-            workLedger: workdayLedger(transactions),
+            // Dias trabalhados (fora do saldo) × parte "diárias" das receitas reais.
+            workdays: alive(raw.workdays),
+            work: workdaySummary(alive(raw.workdays), transactions),
             recurrences: alive(raw.recurrences),
             goals: alive(raw.goals).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)),
             goalDeposits: alive(raw.goalDeposits),
-            // Contas a pagar × pagamentos × reserva (status, totais, histórico).
-            billPayments: alive(raw.billPayments),
-            reserveMoves: alive(raw.reserveMoves).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.createdAt || 0) - (b.createdAt || 0))),
-            billLedger: billsLedger({ bills: alive(raw.bills), payments: alive(raw.billPayments), reserveMoves: alive(raw.reserveMoves) }, today),
+            // Planejamento de contas: só descrição, valor e vencimento (não mexe no saldo).
+            bills: alive(raw.bills),
+            plan: planSummary(alive(raw.bills)),
             accountById: new Map(accountsAll.map((a) => [a.id, a])),
             categoryById: new Map(categoriesAll.map((c) => [c.id, c])),
             // Inclui excluídos: usado para não recriar ocorrências apagadas.
@@ -76,13 +76,16 @@ export function useData() {
 }
 
 // ------------------------------------------------------------
-// Rotas (hash): #/lancamentos?categoria=x
+// Rotas (hash): #/movimentacoes?categoria=x
 // ------------------------------------------------------------
+
+// Endereços antigos (favoritos, atalhos do PWA) continuam funcionando.
+const ROUTE_ALIASES = { '/lancamentos': '/movimentacoes', '/calendario': '/diarias', '/contas-a-pagar': '/planejamento' };
 
 function parseHash() {
     const raw = window.location.hash.replace(/^#/, '') || '/';
     const [path, query = ''] = raw.split('?');
-    return { path: path || '/', params: Object.fromEntries(new URLSearchParams(query)) };
+    return { path: ROUTE_ALIASES[path] || path || '/', params: Object.fromEntries(new URLSearchParams(query)) };
 }
 
 export function useRoute() {

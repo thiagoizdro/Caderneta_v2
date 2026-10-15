@@ -24,8 +24,8 @@ export default defineConfig({
                     { src: 'icons/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
                 ],
                 shortcuts: [
-                    { name: 'Novo lançamento', url: '/#/lancamentos?novo=1' },
-                    { name: 'Calendário', url: '/#/calendario' },
+                    { name: 'Nova movimentação', url: '/#/movimentacoes?novo=1' },
+                    { name: 'Diárias', url: '/#/diarias' },
                 ],
             },
             workbox: {

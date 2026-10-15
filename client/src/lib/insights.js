@@ -6,7 +6,7 @@ import { addMonthsToMonth, clampedDate, diffDays, monthOf, splitMonth } from './
 import { money, percent, relativeDay, shortDate } from './format.js';
 import {
     budgetStatus, cardSummary, expensesByCategory, forecastMonthEnd, goalProgress,
-    isCredit, isWorkday, monthTotals, topExpenses, upcomingCommitments,
+    isCredit, monthTotals, topExpenses, upcomingCommitments,
 } from './finance.js';
 
 /** Mesmo dia no mês anterior (limitado ao fim do mês): compara períodos equivalentes. */
@@ -15,7 +15,7 @@ function samePointLastMonth(today) {
     return clampedDate(prev.year, prev.month, Number(today.slice(8, 10)));
 }
 
-export function buildInsights({ accounts, categories, txs, recurrences, goals, goalDeposits, settings, today }) {
+export function buildInsights({ accounts, categories, txs, recurrences, goals, goalDeposits, settings, today, workdays = [] }) {
     const ym = monthOf(today);
     const prevYm = addMonthsToMonth(ym, -1);
     const prevPoint = samePointLastMonth(today);
@@ -23,7 +23,7 @@ export function buildInsights({ accounts, categories, txs, recurrences, goals, g
     const out = [];
 
     // 1. Previsão de saldo no fim do mês.
-    const f = forecastMonthEnd({ accounts, txs, recurrences, settings, today });
+    const f = forecastMonthEnd({ accounts, txs, recurrences, today });
     if (f.daysLeft > 0) {
         out.push({
             id: 'forecast',
@@ -129,8 +129,8 @@ export function buildInsights({ accounts, categories, txs, recurrences, goals, g
 
     // 9. Modo Diária: ritmo de dias trabalhados.
     if (settings?.mode === 'daily') {
-        const worked = txs.filter((t) => isWorkday(t) && t.date.startsWith(ym)).length;
-        const workedPrev = txs.filter((t) => isWorkday(t) && t.date.startsWith(prevYm) && t.date <= prevPoint).length;
+        const worked = workdays.filter((w) => w.date.startsWith(ym)).length;
+        const workedPrev = workdays.filter((w) => w.date.startsWith(prevYm) && w.date <= prevPoint).length;
         if (worked || workedPrev) {
             const diff = worked - workedPrev;
             out.push({

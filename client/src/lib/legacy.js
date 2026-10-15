@@ -5,7 +5,7 @@ import { suggestCategory } from './categorize.js';
 import { toISODate } from './dates.js';
 import { CATEGORY_IDS, DEFAULT_ACCOUNT_ID, PROFILE_ID, SALARY_RECURRENCE_ID } from './defaults.js';
 import { round2 } from './format.js';
-import { workdayId } from './finance.js';
+import { buildWorkday } from './finance.js';
 
 /** Lê o LocalStorage da versão antiga. Devolve null se não houver nada. */
 export function readLegacyStorage(storage) {
@@ -35,7 +35,7 @@ function toLocalDate(value, fallback) {
 
 /**
  * Converte os dados da v1 em registros da v2:
- *  - dias trabalhados → receitas "Diárias" (um lançamento por dia, com a diária da época)
+ *  - dias trabalhados → registros de diárias (com a diária da época), fora do saldo
  *  - gasto pessoal → despesa, com categoria sugerida pela descrição
  *  - repasse a terceiro → despesa com o nome da pessoa (mantém o "saldo real")
  *  - salário mensal → recorrência de receita todo dia 5
@@ -60,19 +60,11 @@ export function convertLegacy(raw, { today }) {
     };
 
     const transactions = [];
+    const workdays = [];
 
     for (const [date, worked] of Object.entries(workedDays)) {
         if (worked !== true || !/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
-        transactions.push({
-            id: workdayId(date),
-            type: 'income',
-            amount: rate,
-            description: 'Dia trabalhado',
-            date,
-            categoryId: CATEGORY_IDS.work,
-            accountId: DEFAULT_ACCOUNT_ID,
-            source: 'workday',
-        });
+        workdays.push(buildWorkday(date, rate));
     }
 
     for (const t of oldTxs) {
@@ -110,5 +102,5 @@ export function convertLegacy(raw, { today }) {
         });
     }
 
-    return { settings: [settings], transactions, recurrences };
+    return { settings: [settings], transactions, workdays, recurrences };
 }

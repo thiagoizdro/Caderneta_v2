@@ -11,8 +11,52 @@ import { Icon, seriesColor } from './Icon.jsx';
 // Modal: folha deslizante no celular, diálogo no desktop
 // ------------------------------------------------------------
 
+/**
+ * Acompanha a área realmente visível (visualViewport): com o teclado virtual
+ * aberto, o overlay encolhe para caber acima dele e o campo focado rola para
+ * o meio da folha. Assim nenhum campo nem o botão Salvar ficam escondidos.
+ */
+function useVisualViewport(overlayRef) {
+    useEffect(() => {
+        const vv = window.visualViewport;
+        const el = overlayRef.current;
+        if (!vv || !el) return undefined;
+        const apply = () => {
+            el.style.setProperty('--vv-height', `${vv.height}px`);
+            el.style.setProperty('--vv-top', `${vv.offsetTop}px`);
+            el.classList.toggle('kb', window.innerHeight - vv.height > 120);
+        };
+        apply();
+        vv.addEventListener('resize', apply);
+        vv.addEventListener('scroll', apply);
+        return () => {
+            vv.removeEventListener('resize', apply);
+            vv.removeEventListener('scroll', apply);
+        };
+    }, [overlayRef]);
+}
+
 export function Modal({ title, onClose, children, footer, wide = false, labelledBy }) {
     const ref = useRef(null);
+    const overlayRef = useRef(null);
+    useVisualViewport(overlayRef);
+
+    useEffect(() => {
+        const sheet = ref.current;
+        if (!sheet) return undefined;
+        let timer;
+        // Espera o teclado abrir (e a área visível encolher) antes de rolar.
+        const onFocus = (e) => {
+            if (!/INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+            clearTimeout(timer);
+            timer = setTimeout(() => e.target.scrollIntoView?.({ block: 'center', behavior: 'smooth' }), 320);
+        };
+        sheet.addEventListener('focusin', onFocus);
+        return () => {
+            clearTimeout(timer);
+            sheet.removeEventListener('focusin', onFocus);
+        };
+    }, []);
 
     useEffect(() => {
         const previous = document.activeElement;
@@ -39,14 +83,14 @@ export function Modal({ title, onClose, children, footer, wide = false, labelled
     }, [onClose]);
 
     return (
-        <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+        <div className="overlay" ref={overlayRef} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
             <div className={`sheet${wide ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-label={labelledBy ? undefined : title} ref={ref} tabIndex={-1}>
                 <div className="sheet-handle" aria-hidden="true" />
                 <div className="sheet-head">
                     <h2>{title}</h2>
                     <button className="btn-icon sm" onClick={onClose} aria-label="Fechar"><X size={18} /></button>
                 </div>
-                {children}
+                <div className="sheet-body">{children}</div>
                 {footer && <div className="sheet-foot">{footer}</div>}
             </div>
         </div>

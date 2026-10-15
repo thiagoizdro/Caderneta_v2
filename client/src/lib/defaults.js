@@ -49,22 +49,7 @@ export const ACCOUNT_TYPES = {
 
 export const SALARY_RECURRENCE_ID = 'rec-salario';
 
-// "Conta" virtual das diárias ainda não pagas pela empresa. Não existe em
-// `accounts`, então não entra em nenhum saldo: o dinheiro só chega às contas
-// quando um pagamento (transferência a-receber → conta) é registrado.
+// "Conta" virtual usada até a 2.x pelas diárias ainda não pagas. Não existe em
+// `accounts`. Na 3.0 as diárias têm coleção própria; o id só é usado pela
+// migração para reconhecer os registros antigos.
 export const RECEIVABLE_ID = 'a-receber';
-
-export const PAYMENT_METHODS = { pix: 'Pix', cash: 'Dinheiro', transfer: 'Transferência' };
-
-// Contas a pagar. `expense` é a categoria sugerida para a despesa do pagamento.
-export const BILL_CATEGORIES = {
-    education: { label: 'Educação', icon: 'education', expense: CATEGORY_IDS.other },
-    card: { label: 'Cartão', icon: 'card', expense: CATEGORY_IDS.other },
-    financing: { label: 'Financiamento', icon: 'bank', expense: CATEGORY_IDS.home },
-    services: { label: 'Serviços', icon: 'zap', expense: CATEGORY_IDS.home },
-    other: { label: 'Outros', icon: 'tag', expense: CATEGORY_IDS.other },
-};
-
-export const BILL_RECURRENCES = { once: 'Pagamento único', monthly: 'Mensal' };
-
-export const BILL_PAYMENT_MODES = { expense: 'Despesa', transfer: 'Fatura do cartão', none: 'Já está lançado' };

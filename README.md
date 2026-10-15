@@ -78,9 +78,10 @@ npm test
 
 | Módulo | O que faz |
 |---|---|
-| **Painel** | Saldo atual, receitas e despesas do mês (comparadas ao mesmo ponto do mês anterior), disponível após as contas do mês, recibo Diária/Mensal, insights, receitas × despesas (6 meses), evolução do saldo com previsão, despesas por categoria, próximos 7 dias, maiores gastos |
-| **Lançamentos** | Despesa, receita, transferência; repasse a terceiro; filtros por mês, tipo, categoria, conta, origem; busca por texto ou valor; exportação CSV |
-| **Calendário** | Cartão de ponto (modo Diária) com marcação rápida, gastos por dia e lançamentos previstos |
+| **Início** | Saldo atual, receitas e despesas do mês, diárias a receber, contas planejadas e disponível após o planejamento; últimas movimentações; diárias do mês; seções recolhíveis com próximos 7 dias, gráficos, maiores gastos e insights |
+| **Movimentações** | Receitas e despesas reais (abas), transferências entre contas próprias; mês, período ou histórico completo; busca, categoria, conta e origem; totais recebido/gasto; exportação CSV |
+| **Diárias** | Calendário de dias trabalhados (marcação rápida), valor e observação por dia, resumo do mês (dias, total, recebido, pendente) e recebimentos. Nada aqui muda o saldo |
+| **Planejamento** | Contas a juntar: só descrição, valor e vencimento; total por mês e "disponível após planejamento". Não cria lançamentos nem muda o saldo |
 | **Contas e cartões** | Carteira, conta corrente, poupança, cartão, outras; cartão com limite, fechamento, vencimento, fatura atual, fatura a pagar, próximas faturas e pagamento de fatura |
 | **Recorrentes e parcelas** | "Internet · R$ 120 · todo dia 10" gera os lançamentos sozinho; "Notebook · R$ 3.600 · 12x" cria e acompanha as 12 parcelas |
 | **Orçamento** | Limite mensal por categoria, alerta em 80% e 100%, ritmo de gasto do mês |
@@ -91,7 +92,7 @@ npm test
 
 ### Os modos continuam sendo a identidade do Caderneta
 
-- **Diária:** cada dia marcado no calendário vira uma receita com a diária *da época* (mudar o valor não reescreve o passado, a menos que você peça). O recibo mostra bruto, gastos pessoais, repasses a terceiros e o **saldo real**.
+- **Diária:** cada dia marcado fica na coleção `workdays`, com a diária *da época*, e **não** entra no saldo nem nas receitas. Quando a empresa paga, você lança **uma** receita real e informa quanto dela é das diárias (`workdayAmount`); o resto é complementar. Ex.: 8 × R$ 100 pagos com R$ 868 = uma receita de R$ 868 (R$ 800 de diárias + R$ 68 complementares).
 - **Salário Mensal:** o salário vira uma recorrência que entra sozinha no dia do pagamento.
 - Trocar de modo **preserva todos os dados**. Na v1, a troca apagava os lançamentos.
 
@@ -103,17 +104,16 @@ saldo em contas hoje
 + recorrências que ainda vão acontecer
 − faturas de cartão que vencem até o fim do mês
 − gasto variável projetado (média diária do mês × dias restantes; antes do dia 7, usa o mês anterior)
-+ diárias projetadas (modo Diária: ritmo de dias trabalhados × diária)
 ```
 
-"Disponível" no painel = saldo de hoje + agendados + recorrências − faturas, ou seja, o que sobra depois das contas já conhecidas.
+Diárias ainda não recebidas não entram na previsão. "Disponível após planejamento" no Início = saldo atual − total do planejamento (só informativo).
 
 ## Migração da v1
 
 1. **Automática:** se a 2.x for publicada no mesmo endereço da v1, na primeira abertura ela lê `config`, `workedDays` e `transactions` do LocalStorage e converte. Os dados antigos **não são apagados**.
 2. **Por backup:** em Boas-vindas ou em Ajustes → Restaurar backup, selecione o `.json` exportado pela v1.
 
-Conversão: dias trabalhados → receitas "Diárias"; gasto pessoal → despesa com categoria sugerida pela descrição; terceiro → despesa com o nome da pessoa; salário mensal → recorrência todo dia 5 (ajustável).
+Conversão: dias trabalhados → diárias (fora do saldo); gasto pessoal → despesa com categoria sugerida pela descrição; terceiro → despesa com o nome da pessoa; salário mensal → recorrência todo dia 5 (ajustável).
 
 ## Paleta dos gráficos
 
@@ -124,3 +124,17 @@ Receitas × despesas usam azul/laranja (e não verde/vermelho) para funcionar co
 - **2.0:** nova interface (sidebar no desktop, navegação inferior no celular), React + Vite, PWA offline, backend Node/Express, PostgreSQL, autenticação, sincronização, categorias, Dashboard 2.0, migração da v1.
 - **2.1:** contas e cartões (faturas, limite, pagamento), recorrências, parcelamentos.
 - **2.2:** metas, orçamento com alertas, previsão de saldo, insights por regras, relatórios.
+- **3.0:** só receitas e despesas reais mudam o saldo. Diárias com coleção própria (`workdays`) e recebimento como receita única; contas a pagar viram Planejamento (sem pagamentos, reserva ou geração automática); Movimentações com abas, período e histórico; Início reorganizado; folhas e formulários que cabem acima do teclado no celular.
+
+### Migração 3.0
+
+Roda sozinha ao abrir o app (depois de sincronizar), uma vez por registro: o que já tem a marca `migration` é pulado.
+
+- Diária "a receber" → registro em `workdays`; a transação vira lápide (os dados ficam guardados).
+- Diária antiga lançada direto numa conta → continua receita (já estava no saldo), marcada como `legacy-workday` e listada para revisão.
+- Pagamento de diárias (transferência a-receber → conta) → receita na mesma conta, com `workdayAmount`.
+- Despesas de contas pagas (`billpay:`) ficam como estão; contas quitadas saem do planejamento (`archived`), as pagas em parte ficam com o que faltava.
+- Antes de gravar, confere o saldo de cada conta antes/depois; se mudar, não grava nada. Guarda uma cópia completa do banco local antes da primeira gravação.
+- **Ajustes → Atualização 3.0** mostra o relatório (inclui possíveis duplicações para revisar), baixa a cópia de antes e permite desfazer/reaplicar.
+
+No servidor, a única mudança é a coleção `workdays` na lista de sincronização (sem migração SQL). Faça backup do PostgreSQL antes de publicar: `pg_dump "$DATABASE_URL" > caderneta_antes_3.0.sql`.

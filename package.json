@@ -1,8 +1,8 @@
 {
   "name": "caderneta",
-  "version": "2.2.0",
+  "version": "3.0.0",
   "private": true,
-  "description": "Caderneta 2.x — gestão financeira pessoal offline-first com sincronização em nuvem",
+  "description": "Caderneta 3 — gestão financeira pessoal offline-first com sincronização em nuvem",
   "workspaces": [
     "server",
     "client"
