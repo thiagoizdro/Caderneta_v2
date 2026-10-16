@@ -88,19 +88,21 @@ export function Reports() {
 
                 <div className="card">
                     <div className="card-head"><h2>Comparação com {monthLabel(prev)}</h2></div>
-                    <table className="data-table">
-                        <thead><tr><th /><th className="r">{monthLabel(month, { short: true })}</th><th className="r">{monthLabel(prev, { short: true })}</th><th className="r">Var.</th></tr></thead>
-                        <tbody>
-                            {compareRows.map((r) => (
-                                <tr key={r.label}>
-                                    <td>{r.label}</td>
-                                    <td className="r">{r.plain ? r.now : money(r.now)}</td>
-                                    <td className="r">{r.plain ? r.prev : money(r.prev)}</td>
-                                    <td className="r"><Delta current={r.now} previous={r.prev} goodWhenUp={r.up} /></td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
+                    <div className="table-scroll">
+                        <table className="data-table">
+                            <thead><tr><th /><th className="r">{monthLabel(month, { short: true })}</th><th className="r">{monthLabel(prev, { short: true })}</th><th className="r">Var.</th></tr></thead>
+                            <tbody>
+                                {compareRows.map((r) => (
+                                    <tr key={r.label}>
+                                        <td>{r.label}</td>
+                                        <td className="r">{r.plain ? r.now : money(r.now)}</td>
+                                        <td className="r">{r.plain ? r.prev : money(r.prev)}</td>
+                                        <td className="r"><Delta current={r.now} previous={r.prev} goodWhenUp={r.up} /></td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
                     {cats.length > 0 && (
                         <>
                             <div className="label mt" style={{ marginBottom: 6 }}>Por categoria</div>

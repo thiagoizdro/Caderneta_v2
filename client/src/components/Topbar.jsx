@@ -39,7 +39,7 @@ function ThemeToggle() {
     const next = theme === 'dark' ? 'light' : 'dark';
     return (
         <button
-            className="btn-icon"
+            className="btn-icon theme-toggle"
             onClick={() => { applyTheme(next); setTheme(next); }}
             aria-label={next === 'dark' ? 'Usar tema escuro' : 'Usar tema claro'}
             title={next === 'dark' ? 'Tema escuro' : 'Tema claro'}
