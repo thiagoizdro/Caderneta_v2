@@ -362,7 +362,7 @@ a.kpi-link:active { transform: scale(0.98); }
 button.list-row:hover, a.list-row:hover { background: var(--bg-hover); border-radius: 12px; }
 button.list-row:hover + .list-row { border-top-color: transparent; }
 .list-main { flex: 1; min-width: 0; }
-.list-title { font-weight: 700; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.list-title { display: block; font-weight: 700; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .list-sub { font-size: 12.5px; color: var(--ink-muted); display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .list-amount { font-family: var(--font-display); font-weight: 700; font-size: 14.5px; font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
 .list-amount small { display: block; font-size: 11px; font-weight: 600; color: var(--ink-muted); font-family: var(--font-body); }
@@ -815,3 +815,58 @@ button.plan-row:hover { background: var(--bg-hover); }
 .review-note { display: block; font-size: 12.5px; color: var(--ink-muted); overflow-wrap: anywhere; }
 /* Celular: cartão que sobraria sozinho na linha ocupa a largura toda. */
 @media (max-width: 819px) { .kpis-dash > .kpi:last-child:nth-child(even) { grid-column: 1 / -1; } }
+
+/* ============================================
+   Correções de responsividade (celular)
+   ============================================ */
+/* Itens de grid nascem com min-width: auto: um título longo em uma linha
+   (.list-title usa nowrap) alargava a coluna inteira e empurrava o cartão
+   para fora da tela. Com min-width: 0 o texto passa a ser cortado com
+   reticências dentro do cartão, como já era a intenção. */
+.page > *, .grid > *, .grid-2 > *, .grid-3 > *, .list > *, .stack > *, .goal-card > * { min-width: 0; }
+
+/* Calendário: colunas podem encolher; o dia segue quadrado pelo aspect-ratio. */
+.cal-weekdays, .cal-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+@media (max-width: 379px) {
+    .card { padding: 14px; }
+    .cal-weekdays, .cal-grid { gap: 4px; }
+    .cal-day { min-height: 0; border-radius: 10px; font-size: 13px; }
+    .data-table td, .data-table th { padding: 7px 5px; }
+}
+
+/* Cabeçalho do dia: data encolhe com reticências, total nunca quebra. */
+.day-head { gap: 8px; }
+.day-head > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.day-head .num { white-space: nowrap; flex: none; }
+
+/* Valores: quebram só no espaço depois de "R$", nunca no meio do número. */
+.kpi-value, .tx-total b { overflow-wrap: normal; }
+
+/* Linha secundária da lista: cada informação fica numa linha só, com reticências. */
+.list-sub > span:not(.tag) { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 719px) {
+    /* Título e complemento do cartão: o complemento desce de linha se não couber. */
+    .card-head { flex-wrap: wrap; row-gap: 2px; }
+    .card-head h2, .card-head h3 { flex: 1 1 auto; }
+    /* Botões de largura total podem quebrar o texto em vez de passar da borda. */
+    .btn-block { white-space: normal; text-align: center; }
+}
+
+@media (max-width: 379px) {
+    /* Mais espaço para a descrição: ícone e valor um pouco menores. */
+    .list-row { gap: 9px; }
+    .list-row > .cat-icon { width: 32px; height: 32px; border-radius: 10px; }
+    .list-amount { font-size: 13.5px; }
+    /* Totais: recebido e gasto lado a lado, resultado na linha de baixo. */
+    .tx-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .tx-totals > :last-child { grid-column: 1 / -1; }
+}
+
+@media (max-width: 379px) {
+    /* Topo: títulos longos ("Movimentações") ficavam por baixo dos ícones. */
+    .topbar h1 { font-size: 20px; }
+    .topbar-actions .btn-icon { width: 36px; height: 36px; }
+    /* O tema também pode ser trocado em Ajustes → Aparência. */
+    .topbar-actions .theme-toggle { display: none; }
+}

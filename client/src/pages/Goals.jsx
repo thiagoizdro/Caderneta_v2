@@ -178,7 +178,7 @@ function GoalCard({ goal, onEdit, onDeposit, onWithdraw }) {
                     {!p.eta && !p.neededPerMonth && <span>Faça depósitos para ver a previsão de conclusão.</span>}
                 </div>
             )}
-            <div className="row">
+            <div className="row wrap">
                 <button className="btn btn-primary btn-sm" style={{ flex: 1 }} onClick={onDeposit}><Plus size={15} /> Depositar</button>
                 {p.saved > 0 && <button className="btn btn-secondary btn-sm" onClick={onWithdraw}><Minus size={15} /> Retirar</button>}
                 {p.deposits.length > 0 && <button className="btn btn-ghost btn-sm" onClick={() => setHistory(!history)} aria-expanded={history}>Histórico</button>}
